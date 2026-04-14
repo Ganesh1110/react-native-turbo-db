@@ -1,0 +1,282 @@
+#include "DBEngine.h"
+#include "WALManager.h"
+#include <iostream>
+#include <vector>
+
+namespace secure_db {
+
+DBEngine::DBEngine(std::unique_ptr<SecureCryptoContext> crypto) 
+    : start_time_(std::chrono::high_resolution_clock::now()),
+      crypto_(std::move(crypto)),
+      next_free_offset_(8192) {
+}
+
+facebook::jsi::Value DBEngine::get(
+    facebook::jsi::Runtime& runtime,
+    const facebook::jsi::PropNameID& name
+) {
+    std::string propName = name.utf8(runtime);
+    
+    if (propName == "add") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime,
+            name,
+            2,
+            [this](facebook::jsi::Runtime& runtime,
+                   const facebook::jsi::Value& thisValue,
+                   const facebook::jsi::Value* args,
+                   size_t count) -> facebook::jsi::Value {
+                if (count < 2) {
+                    throw facebook::jsi::JSError(runtime, "add requires 2 arguments");
+                }
+                double a = args[0].asNumber();
+                double b = args[1].asNumber();
+                return facebook::jsi::Value(this->add(a, b));
+            }
+        );
+    }
+    
+    if (propName == "echo") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime,
+            name,
+            1,
+            [this](facebook::jsi::Runtime& runtime,
+                   const facebook::jsi::Value& thisValue,
+                   const facebook::jsi::Value* args,
+                   size_t count) -> facebook::jsi::Value {
+                if (count < 1) {
+                    throw facebook::jsi::JSError(runtime, "echo requires 1 argument");
+                }
+                std::string msg = args[0].getString(runtime).utf8(runtime);
+                return facebook::jsi::String::createFromUtf8(runtime, this->echo(msg));
+            }
+        );
+    }
+    
+    if (propName == "benchmark") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime,
+            name,
+            0,
+            [this](facebook::jsi::Runtime& runtime,
+                   const facebook::jsi::Value& thisValue,
+                   const facebook::jsi::Value* args,
+                   size_t count) -> facebook::jsi::Value {
+                return facebook::jsi::Value(this->benchmark());
+            }
+        );
+    }
+    
+    if (propName == "initStorage") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 2,
+            [this](facebook::jsi::Runtime& runtime, const facebook::jsi::Value& thisValue, const facebook::jsi::Value* args, size_t count) -> facebook::jsi::Value {
+                std::string path = args[0].getString(runtime).utf8(runtime);
+                size_t size = args[1].asNumber();
+                return facebook::jsi::Value(this->initStorage(path, size));
+            }
+        );
+    }
+    
+    if (propName == "write") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 2,
+            [this](facebook::jsi::Runtime& runtime, const facebook::jsi::Value& thisValue, const facebook::jsi::Value* args, size_t count) -> facebook::jsi::Value {
+                size_t offset = args[0].asNumber();
+                std::string data = args[1].getString(runtime).utf8(runtime);
+                this->write(offset, data);
+                return facebook::jsi::Value::undefined();
+            }
+        );
+    }
+    
+    if (propName == "read") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 2,
+            [this](facebook::jsi::Runtime& runtime, const facebook::jsi::Value& thisValue, const facebook::jsi::Value* args, size_t count) -> facebook::jsi::Value {
+                size_t offset = args[0].asNumber();
+                size_t length = args[1].asNumber();
+                std::string res = this->read(offset, length);
+                return facebook::jsi::String::createFromUtf8(runtime, res);
+            }
+        );
+    }
+    
+    if (propName == "insertRec") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 2,
+            [this](facebook::jsi::Runtime& runtime, const facebook::jsi::Value& thisValue, const facebook::jsi::Value* args, size_t count) -> facebook::jsi::Value {
+                std::string key = args[0].getString(runtime).utf8(runtime);
+                return this->insertRec(runtime, key, args[1]);
+            }
+        );
+    }
+    
+    if (propName == "findRec") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 1,
+            [this](facebook::jsi::Runtime& runtime, const facebook::jsi::Value& thisValue, const facebook::jsi::Value* args, size_t count) -> facebook::jsi::Value {
+                std::string key = args[0].getString(runtime).utf8(runtime);
+                return this->findRec(runtime, key);
+            }
+        );
+    }
+    
+    return facebook::jsi::Value::undefined();
+}
+
+std::vector<facebook::jsi::PropNameID> DBEngine::getPropertyNames(facebook::jsi::Runtime& runtime) {
+    std::vector<facebook::jsi::PropNameID> names;
+    names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "add"));
+    names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "echo"));
+    names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "benchmark"));
+    names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "initStorage"));
+    names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "write"));
+    names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "read"));
+    names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "insertRec"));
+    names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "findRec"));
+    return names;
+}
+
+double DBEngine::add(double a, double b) {
+    return a + b;
+}
+
+std::string DBEngine::echo(const std::string& message) {
+    return "Echo: " + message;
+}
+
+double DBEngine::benchmark() {
+    auto now = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration<double, std::milli>(now - start_time_).count();
+    return elapsed;
+}
+
+bool DBEngine::initStorage(const std::string& path, size_t size) {
+    if (!mmap_) {
+        mmap_ = std::make_unique<MMapRegion>();
+    }
+    try {
+        mmap_->init(path, size);
+        
+        // Initialize WAL Manager
+        if (!wal_) {
+            wal_ = std::make_unique<WALManager>(path, crypto_.get());
+        }
+        
+        // Phase 6: Run recovery before loading B+ Tree
+        wal_->recover(mmap_.get());
+        
+        // Initialize Phase 4 Tiers natively chained over the mmap pointer
+        if (!pbtree_) {
+            pbtree_ = std::make_unique<PersistentBPlusTree>(mmap_.get(), wal_.get());
+            pbtree_->init(); // Reads/writes Header mapping offset 0
+            
+            // Phase 6: Initialize offset from persisted header
+            next_free_offset_ = pbtree_->getHeader().next_free_offset;
+        }
+        if (!btree_) {
+            btree_ = std::make_unique<BufferedBTree>(pbtree_.get());
+        }
+        
+        return true;
+    } catch(const std::exception& e) {
+        std::cerr << "DBEngine initStorage error: " << e.what() << "\n";
+        return false;
+    }
+}
+
+void DBEngine::write(size_t offset, const std::string& data) {
+    if (mmap_) {
+        mmap_->write(offset, data);
+    }
+}
+
+std::string DBEngine::read(size_t offset, size_t length) {
+    if (mmap_) {
+        return mmap_->read(offset, length);
+    }
+    return "";
+}
+
+facebook::jsi::Value DBEngine::insertRec(facebook::jsi::Runtime& runtime, const std::string& key, const facebook::jsi::Value& obj) {
+    if (!btree_ || !mmap_) return facebook::jsi::Value(false);
+    
+    // Step 1: Use ArenaAllocator avoiding std::bad_alloc/new leakages dictated across heavy batch ops
+    ArenaAllocator arena(1024 * 64); // 64KB sandbox
+    BinarySerializer::serialize(runtime, obj, arena);
+    
+    // Step 2: Grab sequential offset and commit using Encryption proxy
+    size_t offset = next_free_offset_;
+    std::vector<uint8_t> final_payload;
+    
+    if (crypto_) {
+        final_payload = crypto_->encrypt(arena.data(), arena.size());
+    } else {
+        final_payload.assign(arena.data(), arena.data() + arena.size());
+    }
+    
+    size_t payload_len = final_payload.size();
+    
+    uint32_t len32 = static_cast<uint32_t>(payload_len);
+    std::string len_marker(reinterpret_cast<const char*>(&len32), sizeof(uint32_t));
+    std::string data(reinterpret_cast<const char*>(final_payload.data()), payload_len);
+    
+    // Phase 6: Using WAL for atomicity across data write and B-tree update
+    if (wal_) {
+        wal_->logPageWrite(offset, len_marker);
+        wal_->logPageWrite(offset + sizeof(uint32_t), data);
+    } else {
+        mmap_->write(offset, len_marker);
+        mmap_->write(offset + sizeof(uint32_t), data);
+    }
+    
+    // Push the needle cursor to point cleanly behind the record
+    next_free_offset_ += sizeof(uint32_t) + payload_len;
+    pbtree_->setNextFreeOffset(next_free_offset_);
+    
+    // Step 3: Trigger the zero-latency queued background logic
+    btree_->insert(key, offset);
+    
+    if (wal_) {
+        wal_->logCommit();
+    }
+    
+    return facebook::jsi::Value(true);
+}
+
+facebook::jsi::Value DBEngine::findRec(facebook::jsi::Runtime& runtime, const std::string& key) {
+    if (!btree_ || !mmap_) return facebook::jsi::Value::undefined();
+    
+    size_t offset = btree_->find(key);
+    if (offset == 0) return facebook::jsi::Value::undefined();
+    
+    std::string len_bytes = mmap_->read(offset, sizeof(uint32_t));
+    uint32_t payload_len;
+    std::memcpy(&payload_len, len_bytes.data(), sizeof(uint32_t));
+    
+    std::string data_bytes = mmap_->read(offset + sizeof(uint32_t), payload_len);
+    
+    std::vector<uint8_t> decrypted;
+    if (crypto_) {
+        decrypted = crypto_->decrypt(reinterpret_cast<const uint8_t*>(data_bytes.data()), payload_len);
+    } else {
+        decrypted.assign(data_bytes.begin(), data_bytes.end());
+    }
+    
+    auto [val, consumed] = BinarySerializer::deserialize(runtime, decrypted.data(), decrypted.size());
+    
+    return std::move(val);
+}
+
+void installDBEngine(facebook::jsi::Runtime& runtime, std::unique_ptr<SecureCryptoContext> crypto) {
+    auto dbEngine = std::make_shared<DBEngine>(std::move(crypto));
+    runtime.global().setProperty(
+        runtime,
+        "NativeDB",
+        facebook::jsi::Object::createFromHostObject(runtime, dbEngine)
+    );
+}
+
+}

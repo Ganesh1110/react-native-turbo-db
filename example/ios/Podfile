@@ -1,0 +1,48 @@
+ENV['RCT_USE_RN_DEP'] = '1'
+ENV['RCT_NEW_ARCH_ENABLED'] = '1'
+
+# Resolve react_native_pods.rb with node to allow for hoisting
+require Pod::Executable.execute_command('node', ['-p',
+  'require.resolve(
+    "react-native/scripts/react_native_pods.rb",
+    {paths: [process.argv[1]]},
+  )', __dir__]).strip
+
+platform :ios, min_ios_version_supported
+prepare_react_native_project!
+
+linkage = ENV['USE_FRAMEWORKS']
+if linkage != nil
+  Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
+  use_frameworks! :linkage => linkage.to_sym
+end
+
+target 'SecureDBExample' do
+  config = use_native_modules!
+
+  use_react_native!(
+    :path => config[:reactNativePath],
+    :app_path => "#{Pod::Config.instance.installation_root}/.."
+  )
+
+  post_install do |installer|
+    react_native_post_install(
+      installer,
+      config[:reactNativePath],
+      :mac_catalyst_enabled => false,
+    )
+
+    # Workaround: Xcode 26 Beta + RN 0.85 — Folly's Expected.h tries to include
+    # folly/coro/Coroutine.h which does not exist in the iOS 26 SDK.
+    # FOLLY_CFG_NO_COROUTINES is the correct pre-detection guard in Portability.h.
+    # It must be set before compiler feature detection fires (unlike FOLLY_HAS_COROUTINES).
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each do |config|
+        flags = config.build_settings['OTHER_CPLUSPLUSFLAGS'] || '$(inherited)'
+        unless flags.include?('FOLLY_CFG_NO_COROUTINES')
+          config.build_settings['OTHER_CPLUSPLUSFLAGS'] = "#{flags} -DFOLLY_CFG_NO_COROUTINES"
+        end
+      end
+    end
+  end
+end
