@@ -23,6 +23,10 @@ public:
     void write(size_t offset, const std::string& data);
     std::string read(size_t offset, size_t length);
 
+    // Property accessors
+    std::string getPath() const { return path_; }
+    size_t getSize() const { return size_; }
+
 private:
     void* base_addr_;
     size_t size_;

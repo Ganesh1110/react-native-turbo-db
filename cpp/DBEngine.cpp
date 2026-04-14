@@ -123,6 +123,15 @@ facebook::jsi::Value DBEngine::get(
         );
     }
     
+    if (propName == "clearStorage") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 0,
+            [this](facebook::jsi::Runtime& runtime, const facebook::jsi::Value& thisValue, const facebook::jsi::Value* args, size_t count) -> facebook::jsi::Value {
+                return facebook::jsi::Value(this->clearStorage());
+            }
+        );
+    }
+    
     return facebook::jsi::Value::undefined();
 }
 
@@ -136,6 +145,7 @@ std::vector<facebook::jsi::PropNameID> DBEngine::getPropertyNames(facebook::jsi:
     names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "read"));
     names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "insertRec"));
     names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "findRec"));
+    names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "clearStorage"));
     return names;
 }
 
@@ -268,6 +278,25 @@ facebook::jsi::Value DBEngine::findRec(facebook::jsi::Runtime& runtime, const st
     auto [val, consumed] = BinarySerializer::deserialize(runtime, decrypted.data(), decrypted.size());
     
     return std::move(val);
+}
+
+bool DBEngine::clearStorage() {
+    if (!mmap_) return false;
+    
+    std::string path = mmap_->getPath();
+    size_t size = mmap_->getSize();
+    
+    // 1. Close current mapping
+    mmap_->close();
+    btree_.reset();
+    pbtree_.reset();
+    
+    // 2. Remove files
+    std::remove(path.c_str());
+    std::remove((path + ".wal").c_str());
+    
+    // 3. Re-initialize
+    return initStorage(path, size);
 }
 
 void installDBEngine(facebook::jsi::Runtime& runtime, std::unique_ptr<SecureCryptoContext> crypto) {

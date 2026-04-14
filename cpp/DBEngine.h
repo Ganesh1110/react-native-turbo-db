@@ -44,6 +44,7 @@ public:
     // Phase 4 Methods
     facebook::jsi::Value insertRec(facebook::jsi::Runtime& runtime, const std::string& key, const facebook::jsi::Value& obj);
     facebook::jsi::Value findRec(facebook::jsi::Runtime& runtime, const std::string& key);
+    bool clearStorage();
     
 private:
     std::chrono::high_resolution_clock::time_point start_time_;

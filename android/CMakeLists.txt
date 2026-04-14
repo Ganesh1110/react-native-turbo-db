@@ -6,6 +6,7 @@ set (CMAKE_VERBOSE_MAKEFILE ON)
 add_library(
     react-native-secure-db    STATIC
     ../cpp/SecureDBImpl.cpp
+    src/main/cpp/SecureCryptoAndroid.cpp
 )
 
 set_target_properties(
@@ -18,10 +19,14 @@ set_target_properties(
 target_include_directories(
     react-native-secure-db    PUBLIC
     ../cpp
+    src/main/cpp
 )
 
 target_link_libraries(
     react-native-secure-db    jsi
     reactnative
     react_codegen_SecureDBSpec
+    log
+    android
 )
+
