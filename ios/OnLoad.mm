@@ -12,7 +12,7 @@ using namespace facebook::react;
 + (void)load
 {
   registerCxxModuleToGlobalModuleMap(
-    std::string(SecureDBImpl::kModuleName),
+    std::string(NativeSecureDBCxxSpec<SecureDBImpl>::kModuleName),
     [](std::shared_ptr<CallInvoker> jsInvoker) {
       return std::make_shared<SecureDBImpl>(jsInvoker);
     }

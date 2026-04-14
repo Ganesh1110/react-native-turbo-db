@@ -2,6 +2,7 @@ import { SecureDB } from '../index';
 
 // Mock the native module and JSI global
 jest.mock('../NativeSecureDB', () => ({
+  __esModule: true,
   default: {
     install: jest.fn(),
   },
@@ -33,7 +34,7 @@ describe('SecureDB', () => {
   it('can set and get a value', () => {
     const success = db.set('test_key', { data: 'test_value' });
     expect(success).toBe(true);
-    
+
     const val = db.get('test_key');
     expect(val).toEqual({ data: 'test_value' });
   });
