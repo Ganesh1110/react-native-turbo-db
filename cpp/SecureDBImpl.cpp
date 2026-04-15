@@ -24,6 +24,16 @@ void SecureDBImpl::install(jsi::Runtime& rt) {
     secure_db::installDBEngine(rt, std::move(crypto));
 }
 
+std::string SecureDBImpl::getDocumentsDirectory(jsi::Runtime& rt) {
+#ifdef __APPLE__
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *basePath = [paths firstObject];
+    return [basePath UTF8String];
+#else
+    return "";
+#endif
+}
+
 std::string SecureDBImpl::getVersion(jsi::Runtime& rt) {
     return "1.0.0";
 }

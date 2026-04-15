@@ -37,5 +37,9 @@ public abstract class NativeSecureDBSpec extends ReactContextBaseJavaModule impl
 
   @ReactMethod(isBlockingSynchronousMethod = true)
   @DoNotStrip
+  public abstract String getDocumentsDirectory();
+
+  @ReactMethod(isBlockingSynchronousMethod = true)
+  @DoNotStrip
   public abstract String getVersion();
 }

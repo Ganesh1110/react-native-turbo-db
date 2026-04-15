@@ -35,6 +35,11 @@ public class SecureDBModule extends NativeSecureDBSpec {
     }
 
     @Override
+    public String getDocumentsDirectory() {
+        return getReactApplicationContext().getFilesDir().getAbsolutePath();
+    }
+
+    @Override
     public String getVersion() {
         return "1.0.0";
     }

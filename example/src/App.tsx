@@ -6,7 +6,6 @@ import {
   TouchableOpacity,
   View,
   ScrollView,
-  NativeModules,
   ActivityIndicator,
 } from 'react-native';
 import { SecureDB } from 'react-native-secure-db';
@@ -28,8 +27,7 @@ export default function App() {
   const [mmkvResults, setMmkvResults] = useState<BenchResult | null>(null);
 
   const db = useMemo(() => {
-    const docPath =
-      NativeModules.SecureDBInstaller?.getDocumentDirectory() || '/tmp';
+    const docPath = SecureDB.getDocumentsDirectory();
     const dbFile = `${docPath}/benchmark.db`;
     return new SecureDB(dbFile, 50 * 1024 * 1024); // 50MB for heavy bench
   }, []);

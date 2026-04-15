@@ -26,6 +26,11 @@ export class SecureDB {
     NativeSecureDB.install();
   }
 
+  static getDocumentsDirectory(): string {
+    if (!NativeSecureDB) return '';
+    return NativeSecureDB.getDocumentsDirectory();
+  }
+
   private isInitialized = false;
 
   constructor(
