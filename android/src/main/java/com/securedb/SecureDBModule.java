@@ -27,8 +27,11 @@ public class SecureDBModule extends NativeSecureDBSpec {
 
     @Override
     public void install() {
-        long jsiRuntimePointer = getReactApplicationContext().getJavaScriptContextHolder().get();
-        nativeInstall(jsiRuntimePointer);
+        ReactApplicationContext context = getReactApplicationContext();
+        if (context != null && context.getJavaScriptContextHolder() != null) {
+            long jsiRuntimePointer = context.getJavaScriptContextHolder().get();
+            nativeInstall(jsiRuntimePointer);
+        }
     }
 
     @Override

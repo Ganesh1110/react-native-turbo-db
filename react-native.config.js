@@ -4,9 +4,7 @@ module.exports = {
       android: {
         cmakeListsPath: 'android/CMakeLists.txt',
       },
-      ios: {
-        podspecPath: 'SecureDB.podspec',
-      },
+      ios: {},
     },
   },
 };
