@@ -1,0 +1,65 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath "com.android.tools.build:gradle:8.2.1"
+    }
+}
+
+apply plugin: "com.android.library"
+
+def getExtOrDefault(name) {
+    return rootProject.ext.has(name) ? rootProject.ext.get(name) : project.properties["SecureDB_" + name]
+}
+
+android {
+    namespace "com.securedb"
+    compileSdkVersion getExtOrDefault("compileSdkVersion")?.toInteger() ?: 34
+
+    defaultConfig {
+        minSdkVersion getExtOrDefault("minSdkVersion")?.toInteger() ?: 23
+        targetSdkVersion getExtOrDefault("targetSdkVersion")?.toInteger() ?: 34
+
+        externalNativeBuild {
+            cmake {
+                cppFlags "-O3 -frtti -fexceptions -Wall -fstack-protector-all"
+                arguments "-DANDROID_STL=c++_shared"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "CMakeLists.txt"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    lintOptions {
+        disable "GradleCompatible"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+repositories {
+    mavenCentral()
+    google()
+}
+
+dependencies {
+    // For < 0.71, this will be empty; for >= 0.71, this will be handled by the autolinker
+    // but we add it here for manual integration if needed
+    implementation "com.facebook.react:react-native:+"
+}
