@@ -33,9 +33,10 @@ struct BTreeNode {
     uint32_t num_keys;
     static constexpr size_t MAX_KEYS = 32;
     static constexpr size_t KEY_SIZE = 64;
-    char keys[MAX_KEYS][KEY_SIZE];
-    uint64_t values[MAX_KEYS];
-    uint64_t children[MAX_KEYS + 1];
+    // Allow MAX_KEYS + 1 to handle temporary state during splits/inserts
+    char keys[MAX_KEYS + 1][KEY_SIZE];
+    uint64_t values[MAX_KEYS + 1];
+    uint64_t children[MAX_KEYS + 2];
 };
 
 class PersistentBPlusTree {

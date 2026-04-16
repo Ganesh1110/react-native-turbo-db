@@ -77,7 +77,7 @@ void WALManager::clear() {
     if (wal_file_.is_open()) {
         wal_file_.close();
     }
-    std::filesystem::remove(wal_path_);
+    std::remove(wal_path_.c_str());
     wal_file_.open(wal_path_, std::ios::binary | std::ios::app);
 }
 

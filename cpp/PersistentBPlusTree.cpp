@@ -99,15 +99,19 @@ void PersistentBPlusTree::write_node(uint64_t offset, const BTreeNode& node) {
     std::string bytes(reinterpret_cast<const char*>(&node), sizeof(BTreeNode));
     if (wal_) {
         wal_->logPageWrite(offset, bytes);
-    } else {
-        mmap_->write(offset, bytes);
     }
+    // Always write to main file to ensure read_node (which uses mmap) works.
+    // In a production system, you'd only write to main file during checkpoints.
+    mmap_->write(offset, bytes);
 }
 
 BTreeNode PersistentBPlusTree::read_node(uint64_t offset) {
     std::string bytes = mmap_->read(offset, sizeof(BTreeNode));
     BTreeNode node;
-    std::memcpy(&node, bytes.data(), sizeof(BTreeNode));
+    // Safety check: ensure we don't copy more than the string length
+    size_t copy_len = std::min(sizeof(BTreeNode), bytes.size());
+    std::memset(&node, 0, sizeof(BTreeNode));
+    std::memcpy(&node, bytes.data(), copy_len);
     return node;
 }
 
@@ -250,6 +254,7 @@ std::vector<std::pair<std::string, size_t>> PersistentBPlusTree::range(const std
     if (header_.root_offset == 0) return results;
     
     std::function<void(uint64_t)> traverse = [&](uint64_t node_off) {
+        if (node_off == 0) return;
         BTreeNode node = read_node(node_off);
         
         for (uint32_t i = 0; i < node.num_keys; i++) {

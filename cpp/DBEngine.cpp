@@ -6,6 +6,12 @@
 
 #ifdef __ANDROID__
 #include <android/log.h>
+#define LOG_TAG "SecureDB_Native"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#else
+#define LOGI(...)
+#define LOGE(...)
 #endif
 
 namespace secure_db {
@@ -322,7 +328,10 @@ facebook::jsi::Value DBEngine::insertRec(facebook::jsi::Runtime& runtime, const 
 }
 
 facebook::jsi::Value DBEngine::insertRecInternal(facebook::jsi::Runtime& runtime, const std::string& key, const facebook::jsi::Value& obj, bool shouldCommit) {
-    if (!btree_ || !mmap_) return facebook::jsi::Value(false);
+    if (!btree_ || !mmap_) {
+        LOGE("insertRecInternal: btree or mmap is null");
+        return facebook::jsi::Value(false);
+    }
     
     try {
         // Step 1: Use reusable ArenaAllocator avoiding std::bad_alloc/new leakages
@@ -340,19 +349,20 @@ facebook::jsi::Value DBEngine::insertRecInternal(facebook::jsi::Runtime& runtime
         }
         
         size_t payload_len = final_payload.size();
-        
         uint32_t len32 = static_cast<uint32_t>(payload_len);
         std::string len_marker(reinterpret_cast<const char*>(&len32), sizeof(uint32_t));
         std::string data(reinterpret_cast<const char*>(final_payload.data()), payload_len);
         
-        // Phase 6: Using WAL for atomicity across data write and B-tree update
+        // Phase 6: Using WAL for atomicity, but MUST also write to main file
+        // in this prototype to ensure findRec (which reads from mmap) works immediately.
         if (wal_) {
             wal_->logPageWrite(offset, len_marker);
             wal_->logPageWrite(offset + sizeof(uint32_t), data);
-        } else {
-            mmap_->write(offset, len_marker);
-            mmap_->write(offset + sizeof(uint32_t), data);
         }
+        
+        // Always write to mmap to keep it in sync with the index
+        mmap_->write(offset, len_marker);
+        mmap_->write(offset + sizeof(uint32_t), data);
         
         // Push the needle cursor to point cleanly behind the record
         next_free_offset_ += sizeof(uint32_t) + payload_len;
@@ -367,10 +377,10 @@ facebook::jsi::Value DBEngine::insertRecInternal(facebook::jsi::Runtime& runtime
         
         return facebook::jsi::Value(true);
     } catch (const std::exception& e) {
-#ifdef __ANDROID__
-        __android_log_print(ANDROID_LOG_ERROR, "SecureDB", "insertRec error: %s", e.what());
-#endif
-        std::cerr << "SecureDB insertRec error: " << e.what() << "\n";
+        LOGE("insertRec error: %s", e.what());
+        return facebook::jsi::Value(false);
+    } catch (...) {
+        LOGE("insertRec unknown error");
         return facebook::jsi::Value(false);
     }
 }

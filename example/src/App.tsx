@@ -77,22 +77,27 @@ export default function App() {
 
     // --- SecureDB Benchmark ---
     try {
+      console.log('Starting SecureDB clear...');
       db.clear();
+      console.log('SecureDB clear done.');
+
       const sWriteStart = performance.now();
       for (let i = 0; i < ITEM_COUNT; i++) {
+        if (i % 100 === 0) console.log(`SecureDB writing: ${i}/${ITEM_COUNT}`);
         db.set(`key_${i.toString().padStart(4, '0')}`, testData);
       }
-      // Note: SecureDB uses a Write Buffer (size 64).
-      // We can flush manually to measure full persistence time.
+      console.log('SecureDB flushing...');
       db.flush();
       const sWriteEnd = performance.now();
+      console.log('SecureDB write benchmark done.');
 
       const sReadStart = performance.now();
       for (let i = 0; i < ITEM_COUNT; i++) {
+        if (i % 100 === 0) console.log(`SecureDB reading: ${i}/${ITEM_COUNT}`);
         db.get(`key_${i.toString().padStart(4, '0')}`);
       }
       const sReadEnd = performance.now();
-
+      console.log('SecureDB read benchmark done.');
       setSecureDBResults({
         write: sWriteEnd - sWriteStart,
         read: sReadEnd - sReadStart,
