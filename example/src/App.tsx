@@ -15,20 +15,14 @@ import { createMMKV } from 'react-native-mmkv';
 
 const BenchmarkPage = () => {
   const [results, setResults] = useState<Record<string, number[]>>({});
-  const [isRunning, setIsRunning] = useState(false);
-  const [currentTest, setCurrentTest] = useState('');
+  const [isRunning, setIsRunning] = useState<'SecureDB' | 'MMKV' | null>(null);
 
   const NUM_OPERATIONS = 1000;
   const NUM_QUERIES = 2000;
 
-  const runBenchmark = async () => {
-    setIsRunning(true);
-    setResults({});
+  const runSecureDBBenchmark = async () => {
+    setIsRunning('SecureDB');
 
-    const allResults: Record<string, number[]> = {};
-
-    // Test SecureDB
-    setCurrentTest('SecureDB');
     const docsDir = SecureDB.getDocumentsDirectory();
     const secureDB = new SecureDB(
       `${docsDir}/bench_secure_v2.db`,
@@ -37,19 +31,20 @@ const BenchmarkPage = () => {
     secureDB.clear();
     await new Promise((resolve) => setTimeout(resolve, 100));
     const secureDBTimes = await benchmarkSecureDB(secureDB);
-    allResults.SecureDB = secureDBTimes;
-    setResults({ ...allResults });
 
-    // Test MMKV
-    setCurrentTest('MMKV');
+    setResults((prev) => ({ ...prev, SecureDB: secureDBTimes }));
+    setIsRunning(null);
+  };
+
+  const runMMKVBenchmark = async () => {
+    setIsRunning('MMKV');
+
     const mmkv = createMMKV({ id: 'bench_mmkv_v2' });
     mmkv.clearAll();
     const mmkvTimes = await benchmarkMMKV(mmkv);
-    allResults.MMKV = mmkvTimes;
-    setResults({ ...allResults });
 
-    setIsRunning(false);
-    setCurrentTest('');
+    setResults((prev) => ({ ...prev, MMKV: mmkvTimes }));
+    setIsRunning(null);
   };
 
   const benchmarkSecureDB = async (db: SecureDB): Promise<number[]> => {
@@ -101,18 +96,21 @@ const BenchmarkPage = () => {
     const times: number[] = [];
 
     // Preparation (OUTSIDE timer to match SecureDB)
-    const data: Array<{key: string, val: string}> = [];
+    const data: Array<{ key: string; val: string }> = [];
     for (let i = 0; i < NUM_OPERATIONS; i++) {
       data.push({
         key: `mmkv_key_${i}`,
-        val: JSON.stringify({ id: i, name: `Item ${i}`, value: Math.random() })
+        val: JSON.stringify({ id: i, name: `Item ${i}`, value: Math.random() }),
       });
     }
 
     // Bulk Insert (MMKV doesn't have setMulti for objects, so we loop)
     const insertStart = Date.now();
     for (let i = 0; i < NUM_OPERATIONS; i++) {
-      mmkv.set(data[i].key, data[i].val);
+      const item = data[i];
+      if (item) {
+        mmkv.set(item.key, item.val);
+      }
     }
     const insertEnd = Date.now();
     times.push(insertEnd - insertStart);
@@ -190,26 +188,111 @@ const BenchmarkPage = () => {
         </Text>
       </View>
 
-      <TouchableOpacity
-        style={[
-          styles.benchmarkButton,
-          isRunning && styles.benchmarkButtonDisabled,
-        ]}
-        onPress={runBenchmark}
-        disabled={isRunning}
-      >
-        {isRunning ? (
-          <View style={styles.runningContainer}>
-            <ActivityIndicator size="small" color="#fff" />
-            <Text style={styles.benchmarkButtonText}>
-              {' '}
-              Running {currentTest}...
-            </Text>
+      <View style={styles.benchmarkButtonRow}>
+        <TouchableOpacity
+          style={[
+            styles.benchmarkButton,
+            styles.splitButton,
+            isRunning === 'SecureDB' && styles.benchmarkButtonDisabled,
+          ]}
+          onPress={runSecureDBBenchmark}
+          disabled={isRunning !== null}
+        >
+          {isRunning === 'SecureDB' ? (
+            <View style={styles.runningContainer}>
+              <ActivityIndicator size="small" color="#fff" />
+              <Text style={styles.benchmarkButtonText}> Running...</Text>
+            </View>
+          ) : (
+            <Text style={styles.benchmarkButtonText}>SecureDB Benchmark</Text>
+          )}
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[
+            styles.benchmarkButton,
+            styles.splitButton,
+            isRunning === 'MMKV' && styles.benchmarkButtonDisabled,
+          ]}
+          onPress={runMMKVBenchmark}
+          disabled={isRunning !== null}
+        >
+          {isRunning === 'MMKV' ? (
+            <View style={styles.runningContainer}>
+              <ActivityIndicator size="small" color="#fff" />
+              <Text style={styles.benchmarkButtonText}> Running...</Text>
+            </View>
+          ) : (
+            <Text style={styles.benchmarkButtonText}>MMKV Benchmark</Text>
+          )}
+        </TouchableOpacity>
+      </View>
+
+      {results.SecureDB && (
+        <View style={styles.resultSection}>
+          <Text style={styles.resultSectionTitle}>SecureDB Results</Text>
+          <View style={styles.resultTable}>
+            <View style={styles.resultHeader}>
+              <Text style={[styles.resultLabel, { flex: 2 }]}>Operation</Text>
+              <Text style={[styles.resultHeaderCell, { flex: 1 }]}>Time</Text>
+            </View>
+            <View style={styles.resultRow}>
+              <Text style={[styles.resultLabel, { flex: 2 }]}>Bulk Insert</Text>
+              <Text
+                style={[styles.resultValue, styles.secureDBColor, { flex: 1 }]}
+              >
+                {formatTime(results.SecureDB[0]!)}
+              </Text>
+            </View>
+            <View style={styles.resultRow}>
+              <Text style={[styles.resultLabel, { flex: 2 }]}>Random Read</Text>
+              <Text
+                style={[styles.resultValue, styles.secureDBColor, { flex: 1 }]}
+              >
+                {formatTime(results.SecureDB[1]!)}
+              </Text>
+            </View>
+            <View style={styles.resultRow}>
+              <Text style={[styles.resultLabel, { flex: 2 }]}>Range Query</Text>
+              <Text
+                style={[styles.resultValue, styles.secureDBColor, { flex: 1 }]}
+              >
+                {formatTime(results.SecureDB[2]!)}
+              </Text>
+            </View>
           </View>
-        ) : (
-          <Text style={styles.benchmarkButtonText}>Run Benchmark</Text>
-        )}
-      </TouchableOpacity>
+        </View>
+      )}
+
+      {results.MMKV && (
+        <View style={styles.resultSection}>
+          <Text style={styles.resultSectionTitle}>MMKV Results</Text>
+          <View style={styles.resultTable}>
+            <View style={styles.resultHeader}>
+              <Text style={[styles.resultLabel, { flex: 2 }]}>Operation</Text>
+              <Text style={[styles.resultHeaderCell, { flex: 1 }]}>Time</Text>
+            </View>
+            <View style={styles.resultRow}>
+              <Text style={[styles.resultLabel, { flex: 2 }]}>Bulk Insert</Text>
+              <Text style={[styles.resultValue, styles.mmkvColor, { flex: 1 }]}>
+                {formatTime(results.MMKV[0]!)}
+              </Text>
+            </View>
+            <View style={styles.resultRow}>
+              <Text style={[styles.resultLabel, { flex: 2 }]}>Random Read</Text>
+              <Text style={[styles.resultValue, styles.mmkvColor, { flex: 1 }]}>
+                {formatTime(results.MMKV[1]!)}
+              </Text>
+            </View>
+            <View style={styles.resultRow}>
+              <Text style={[styles.resultLabel, { flex: 2 }]}>Range Query</Text>
+              <Text style={[styles.resultValue, styles.mmkvColor, { flex: 1 }]}>
+                {formatTime(results.MMKV[2]!)}
+              </Text>
+            </View>
+          </View>
+        </View>
+      )}
 
       {results.SecureDB && results.MMKV && (
         <>
@@ -269,11 +352,6 @@ export default function App() {
     return new SecureDB(dbFile, 10 * 1024 * 1024);
   }, []);
 
-  useEffect(() => {
-    setDbPath(SecureDB.getDocumentsDirectory());
-    refreshKeys();
-  }, [refreshKeys]);
-
   const refreshKeys = useCallback(() => {
     try {
       const keys = db.getAllKeys();
@@ -282,6 +360,11 @@ export default function App() {
       console.error('Refresh Keys Error:', e);
     }
   }, [db]);
+
+  useEffect(() => {
+    setDbPath(SecureDB.getDocumentsDirectory());
+    refreshKeys();
+  }, [refreshKeys]);
 
   const handleSet = () => {
     if (!key) {
@@ -483,7 +566,7 @@ export default function App() {
                 multiline
               />
 
-              <View style={styles.buttonRow}>
+              <View style={styles.benchmarkButtonRow}>
                 <TouchableOpacity style={styles.button} onPress={handleSet}>
                   <Text style={styles.buttonText}>Set</Text>
                 </TouchableOpacity>
@@ -814,6 +897,15 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: 'center',
     marginBottom: 20,
+  },
+  benchmarkButtonRow: { flexDirection: 'row', gap: 12, marginBottom: 20 },
+  splitButton: { flex: 1, marginBottom: 0 },
+  resultSection: { marginBottom: 16 },
+  resultSectionTitle: {
+    color: '#94A3B8',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 8,
   },
   benchmarkButtonDisabled: { opacity: 0.6 },
   benchmarkButtonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
