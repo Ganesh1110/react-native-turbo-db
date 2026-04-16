@@ -270,7 +270,7 @@ export default function App() {
                   <Text style={styles.buttonText}>SET</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={[styles.button, { backgroundColor: '#38BDF8' }]}
+                  style={[styles.button, { backgroundColor: '#EF4444' }]}
                   onPress={handleGet}
                 >
                   <Text style={[styles.buttonText, { color: '#fff' }]}>
@@ -280,7 +280,17 @@ export default function App() {
                 <TouchableOpacity
                   style={[styles.button, { backgroundColor: '#EF4444' }]}
                   onPress={() => {
-                    db.del(key);
+                    console.log('DEL: calling with key:', key);
+                    console.log(
+                      'DEL: global.NativeDB.del:',
+                      typeof (global as any).NativeDB?.del
+                    );
+                    try {
+                      const result = db.del(key);
+                      console.log('DEL: result:', result);
+                    } catch (e) {
+                      console.log('DEL: error:', e);
+                    }
                     refreshKeys();
                   }}
                 >

@@ -56,7 +56,8 @@ export class SecureDB {
       );
       return false;
     }
-    return NativeSecureDB.install();
+    NativeSecureDB.install();
+    return true;
   }
 
   static getDocumentsDirectory(): string {

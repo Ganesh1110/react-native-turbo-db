@@ -38,31 +38,126 @@ target 'SecureDBExample' do
     # FOLLY_CFG_NO_COROUTINES is the correct pre-detection guard in Portability.h.
     # It must be set before compiler feature detection fires (unlike FOLLY_HAS_COROUTINES).
     installer.pods_project.targets.each do |target|
-      if target.name == 'libsodium'
-        target.build_configurations.each do |config|
-          # Ensure libsodium looks at its own headers first to avoid collision with react-native's utils.h
-          header_paths = config.build_settings['HEADER_SEARCH_PATHS'] || '$(inherited)'
-          unless header_paths.include?('src/libsodium/include/sodium')
-            config.build_settings['HEADER_SEARCH_PATHS'] = "\"$(PODS_TARGET_SRCROOT)/src/libsodium/include/sodium\" #{header_paths}"
+      target.build_configurations.each do |config|
+        # Ensure libsodium headers are prioritized everywhere to avoid utils.h collision
+        header_paths = config.build_settings['HEADER_SEARCH_PATHS'] || '$(inherited)'
+        unless header_paths.include?('src/libsodium/include/sodium')
+          config.build_settings['HEADER_SEARCH_PATHS'] = "\"$(PODS_ROOT)/libsodium/src/libsodium/include/sodium\" #{header_paths}"
+        end
+
+        # Remove React-VFS overlay which causes header collisions (utils.h)
+        ['OTHER_CFLAGS', 'OTHER_CPLUSPLUSFLAGS', 'OTHER_SWIFT_FLAGS'].each do |key|
+          settings = config.build_settings[key]
+          if settings.is_a?(String)
+            # Handle both quoted and unquoted paths, and both -ivfsoverlay and -Xcc -ivfsoverlay
+            config.build_settings[key] = settings.gsub(/-ivfsoverlay\s+\"[^\"]*React-VFS\.yaml\"/, '')
+                                               .gsub(/-ivfsoverlay\s+[^\s]*React-VFS\.yaml/, '')
+                                               .gsub(/-Xcc\s+-ivfsoverlay\s+\"[^\"]*React-VFS\.yaml\"/, '')
+                                               .gsub(/-Xcc\s+-ivfsoverlay\s+[^\s]*React-VFS\.yaml/, '')
+          elsif settings.is_a?(Array)
+            config.build_settings[key] = settings.reject { |s| s.include?('React-VFS.yaml') }
+            # Also need to reject the flag itself if it's a separate element
+            new_settings = []
+            skip_next = false
+            config.build_settings[key].each_with_index do |s, i|
+              if skip_next
+                skip_next = false
+                next
+              end
+              if s == '-ivfsoverlay' || s == '-Xcc'
+                # Check if next element contains React-VFS.yaml
+                if config.build_settings[key][i+1] && config.build_settings[key][i+1].include?('React-VFS.yaml')
+                  skip_next = true
+                  next
+                end
+              end
+              new_settings << s unless s.include?('React-VFS.yaml')
+            end
+            config.build_settings[key] = new_settings
           end
-          
-          # Remove React-VFS overlay which causes header collisions (utils.h)
+        end
+
+        if target.name == 'libsodium'
+          # Add alignment flags and ignore alignment errors
           ['OTHER_CFLAGS', 'OTHER_CPLUSPLUSFLAGS'].each do |key|
-            settings = config.build_settings[key]
-            if settings.is_a?(String)
-              config.build_settings[key] = settings.gsub(/-ivfsoverlay\s+\"[^\"]*React-VFS\.yaml\"/, '').gsub(/-ivfsoverlay\s+[^\s]*React-VFS\.yaml/, '')
-            elsif settings.is_a?(Array)
-              config.build_settings[key] = settings.map { |s| s.gsub(/-ivfsoverlay\s+\"[^\"]*React-VFS\.yaml\"/, '').gsub(/-ivfsoverlay\s+[^\s]*React-VFS\.yaml/, '') }
+            flags = config.build_settings[key] || '$(inherited)'
+            unless flags.include?('-DLS_ALIGNED_ONLY')
+              config.build_settings[key] = "#{flags} -DLS_ALIGNED_ONLY -DLS_STRICT_ALIGNMENT -Wno-error=invalid-alignment"
             end
           end
         end
-      end
-
-      target.build_configurations.each do |config|
         flags = config.build_settings['OTHER_CPLUSPLUSFLAGS'] || '$(inherited)'
         unless flags.include?('FOLLY_CFG_NO_COROUTINES')
           config.build_settings['OTHER_CPLUSPLUSFLAGS'] = "#{flags} -DFOLLY_CFG_NO_COROUTINES"
         end
+      end
+    end
+    # Fix libsodium header collision by renaming utils.h to sodium_utils.h
+    libsodium_path = "Pods/libsodium/src/libsodium"
+    if Dir.exist?(libsodium_path)
+      # Ensure write permissions
+      `chmod -R +w #{libsodium_path}`
+      # 1. Rename all utils.h files
+      `find #{libsodium_path} -name "utils.h"`.split("\n").each do |file|
+        dir = File.dirname(file)
+        `mv #{file} #{dir}/sodium_utils.h`
+      end
+      # 2. Update all includes
+      `grep -r "include \\\"utils.h\\\"" #{libsodium_path} | cut -d: -f1 | sort | uniq`.split("\n").each do |file|
+        content = File.read(file)
+        new_content = content.gsub(/include\s+\"utils\.h\"/, 'include "sodium_utils.h"')
+        File.write(file, new_content)
+      end
+      
+      # 2b. Update sodium.h specifically
+      sodium_h = "Pods/libsodium/src/libsodium/include/sodium.h"
+      if File.exist?(sodium_h)
+        content = File.read(sodium_h)
+        new_content = content.gsub(/include\s+\"sodium\/utils\.h\"/, 'include "sodium/sodium_utils.h"')
+        File.write(sodium_h, new_content)
+      end
+      
+      # 3. Fix alignment error in blake2b by adding padding
+      blake2b_header = "Pods/libsodium/src/libsodium/include/sodium/crypto_generichash_blake2b.h"
+      if File.exist?(blake2b_header)
+        content = File.read(blake2b_header)
+        # Original:
+        # typedef CRYPTO_ALIGN(64) struct crypto_generichash_blake2b_state {
+        #     uint64_t h[8];
+        #     uint64_t t[2];
+        #     uint64_t f[2];
+        #     uint8_t  buf[2 * 128];
+        #     size_t   buflen;
+        #     uint8_t  last_node;
+        # } crypto_generichash_blake2b_state;
+        # Size = 64 + 16 + 16 + 256 + 8 + 1 = 361. 
+        # Add 7 bytes of padding to reach 368 (divisible by 8).
+        unless content.include?('uint8_t  _padding[7];')
+          new_content = content.gsub(/uint8_t\s+last_node;/, "uint8_t  last_node;\n    uint8_t  _padding[7];")
+                               .gsub(/CRYPTO_ALIGN\(64\)/, 'CRYPTO_ALIGN(8)')
+          File.write(blake2b_header, new_content)
+        end
+      end
+    end
+
+    # Direct fix for libsodium xcconfig files to remove React-VFS overlay
+    ['debug', 'release'].each do |config|
+      xcconfig_path = "Pods/Target Support Files/libsodium/libsodium.#{config}.xcconfig"
+      if File.exist?(xcconfig_path)
+        content = File.read(xcconfig_path)
+        new_content = content.gsub(/-ivfsoverlay\s+\"[^\"]*React-VFS\.yaml\"/, '')
+                             .gsub(/-ivfsoverlay\s+[^\s]*React-VFS\.yaml/, '')
+        
+        # Add alignment flags and ignore alignment errors
+        unless new_content.include?('-DLS_ALIGNED_ONLY')
+          if new_content =~ /OTHER_CFLAGS = \$\(inherited\)/
+            new_content = new_content.gsub(/OTHER_CFLAGS = \$\(inherited\)/, 'OTHER_CFLAGS = $(inherited) -DLS_ALIGNED_ONLY -DLS_STRICT_ALIGNMENT -Wno-error=invalid-alignment -Wno-invalid-alignment')
+          else
+            new_content << "\nOTHER_CFLAGS = $(inherited) -DLS_ALIGNED_ONLY -DLS_STRICT_ALIGNMENT -Wno-error=invalid-alignment -Wno-invalid-alignment"
+          end
+        end
+        
+        File.write(xcconfig_path, new_content)
       end
     end
   end

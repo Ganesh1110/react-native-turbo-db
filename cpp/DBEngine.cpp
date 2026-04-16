@@ -212,12 +212,25 @@ facebook::jsi::Value DBEngine::get(
     }
     
     if (propName == "remove" || propName == "del") {
+#ifdef __ANDROID__
+        __android_log_print(ANDROID_LOG_INFO, "SecureDB", "getProperty: handling del/remove");
+#endif
         return facebook::jsi::Function::createFromHostFunction(
             runtime, name, 1,
             [this](facebook::jsi::Runtime& runtime, const facebook::jsi::Value& thisValue, const facebook::jsi::Value* args, size_t count) -> facebook::jsi::Value {
+#ifdef __ANDROID__
+                __android_log_print(ANDROID_LOG_INFO, "SecureDB", "del function called");
+#endif
                 std::unique_lock lock(rw_mutex_);
                 std::string key = args[0].getString(runtime).utf8(runtime);
-                return facebook::jsi::Value(this->remove(key));
+#ifdef __ANDROID__
+                __android_log_print(ANDROID_LOG_INFO, "SecureDB", "del key: %s", key.c_str());
+#endif
+                bool result = this->remove(key);
+#ifdef __ANDROID__
+                __android_log_print(ANDROID_LOG_INFO, "SecureDB", "del result: %d", result);
+#endif
+                return facebook::jsi::Value(result);
             }
         );
     }
@@ -851,6 +864,7 @@ bool DBEngine::remove(const std::string& key) {
     if (offset == 0) return false;
     
     btree_->insert(key, 0); // Correctly update buffered tree with 0 offset (deleted)
+    btree_->flush(); // Sync deletion to disk immediately
     return true;
 }
 

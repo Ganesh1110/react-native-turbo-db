@@ -1,6 +1,12 @@
 #include "SecureDBImpl.h"
 #include "DBEngine.h"
 
+#if __has_include(<SecureDBSpecJSI.h>)
+#include <SecureDBSpecJSI.h>
+#elif __has_include("SecureDBSpecJSI.h")
+#include "SecureDBSpecJSI.h"
+#endif
+
 #ifdef __APPLE__
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
@@ -30,7 +36,7 @@ SecureDBImpl::SecureDBImpl(
   : NativeSecureDBCxxSpec(std::move(jsInvoker)) {
 }
 
-bool SecureDBImpl::install(jsi::Runtime& rt) {
+void SecureDBImpl::install(jsi::Runtime& rt) {
     std::unique_ptr<secure_db::SodiumCryptoContext> crypto = nullptr;
 #ifdef __APPLE__
     crypto = std::make_unique<secure_db::SodiumCryptoContext>();
@@ -38,9 +44,7 @@ bool SecureDBImpl::install(jsi::Runtime& rt) {
 #endif
 
     secure_db::installDBEngine(rt, jsInvoker_, std::move(crypto));
-    return true;
 }
-
 std::string SecureDBImpl::getDocumentsDirectory(jsi::Runtime& rt) {
 #ifdef __APPLE__
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);

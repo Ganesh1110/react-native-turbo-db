@@ -1,7 +1,7 @@
 #pragma once
 
 #include "SecureCryptoContext.h"
-#include <sodium.h>
+#include "sodium.h"
 #include <vector>
 #include <memory>
 #include <stdexcept>

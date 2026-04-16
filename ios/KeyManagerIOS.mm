@@ -9,6 +9,12 @@ namespace secure_db {
 static NSString* kWrappedKeyTag = @"com.securedb.wrappedkey";
 static NSString* kSecureEnclaveTag = @"com.securedb.enclave.key";
 
+static std::vector<uint8_t> secDataToVector(CFDataRef data) {
+    if (!data) return {};
+    const uint8_t* bytes = CFDataGetBytePtr(data);
+    return std::vector<uint8_t>(bytes, bytes + CFDataGetLength(data));
+}
+
 static SecKeyRef generateSecureEnclaveKey() {
     CFErrorRef error = NULL;
 
@@ -96,7 +102,7 @@ std::vector<uint8_t> KeyManagerIOS::wrapMasterKey(const std::vector<uint8_t>& ma
     }
 
     CFErrorRef error = NULL;
-    SecKeyRef encryptedKey = SecKeyCreateEncryptedData(
+    CFDataRef encryptedData = SecKeyCreateEncryptedData(
         publicKey,
         kSecKeyAlgorithmECIESEncryptionCofactorVariableIVX963SHA256AESGCM,
         plainData,
@@ -105,13 +111,13 @@ std::vector<uint8_t> KeyManagerIOS::wrapMasterKey(const std::vector<uint8_t>& ma
 
     CFRelease(plainData);
 
-    if (!encryptedKey) {
+    if (!encryptedData) {
         if (error) CFRelease(error);
         throw std::runtime_error("Failed to wrap master key");
     }
 
-    std::vector<uint8_t> result = secKeyToVector(encryptedKey);
-    CFRelease(encryptedKey);
+    std::vector<uint8_t> result = secDataToVector(encryptedData);
+    CFRelease(encryptedData);
 
     return result;
 }
@@ -123,7 +129,7 @@ std::vector<uint8_t> KeyManagerIOS::unwrapMasterKey(const std::vector<uint8_t>& 
     }
 
     CFErrorRef error = NULL;
-    SecKeyRef decryptedKey = SecKeyCreateDecryptedData(
+    CFDataRef decryptedData = SecKeyCreateDecryptedData(
         privateKey,
         kSecKeyAlgorithmECIESEncryptionCofactorVariableIVX963SHA256AESGCM,
         cipherData,
@@ -132,13 +138,13 @@ std::vector<uint8_t> KeyManagerIOS::unwrapMasterKey(const std::vector<uint8_t>& 
 
     CFRelease(cipherData);
 
-    if (!decryptedKey) {
+    if (!decryptedData) {
         if (error) CFRelease(error);
         throw std::runtime_error("Failed to unwrap master key");
     }
 
-    std::vector<uint8_t> result = secKeyToVector(decryptedKey);
-    CFRelease(decryptedKey);
+    std::vector<uint8_t> result = secDataToVector(decryptedData);
+    CFRelease(decryptedData);
 
     return result;
 }
@@ -161,7 +167,8 @@ std::vector<uint8_t> KeyManagerIOS::getOrGenerateMasterKey(const std::string& al
 
         if (status == errSecSuccess && result) {
             NSData *wrappedKey = (__bridge NSData*)result;
-            std::vector<uint8_t> wrapped(wrappedKey.bytes, wrappedKey.bytes + wrappedKey.length);
+            const uint8_t* wrappedKeyBytes = (const uint8_t*)wrappedKey.bytes;
+            std::vector<uint8_t> wrapped(wrappedKeyBytes, wrappedKeyBytes + wrappedKey.length);
 
             SecKeyRef privateKey = getOrCreateSecureEnclaveKey();
             try {
