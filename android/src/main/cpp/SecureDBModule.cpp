@@ -67,23 +67,21 @@ static std::vector<uint8_t> getMasterKeyFromJava(JNIEnv *env) {
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_securedb_SecureDBModule_nativeInstall(JNIEnv *env, jobject thiz, jlong jsi_runtime_pointer) {
-    LOGI("nativeInstall: starting installation...");
+Java_com_securedb_SecureDBModule_nativeInstall(JNIEnv *env, jobject thiz, jlong jsi_runtime_pointer, jint install_mode) {
+    LOGI("nativeInstall: starting installation, mode=%d...", install_mode);
     auto runtime = reinterpret_cast<jsi::Runtime *>(jsi_runtime_pointer);
     
     if (runtime) {
         try {
-            // Create the unified Libsodium-based crypto context
-            LOGI("nativeInstall: creating SodiumCryptoContext");
+            LOGI("nativeInstall: creating SodiumCryptoContext (Turbo Mode)");
             auto crypto = std::make_unique<secure_db::SodiumCryptoContext>();
             
             std::vector<uint8_t> key = getMasterKeyFromJava(env);
             crypto->setMasterKey(key);
             
-            // Install the DB Engine into the JSI runtime
-            LOGI("nativeInstall: installing DB Engine");
+            LOGI("nativeInstall: installing Turbo DB Engine");
             secure_db::installDBEngine(*runtime, std::move(crypto));
-            LOGI("nativeInstall: installation complete");
+            LOGI("nativeInstall: Turbo Mode installation complete");
         } catch (const std::exception& e) {
             LOGE("nativeInstall error: %s", e.what());
             jclass xcls = env->FindClass("java/lang/RuntimeException");

@@ -23,11 +23,14 @@ declare const global: {
   };
 };
 
+export type DBMode = 'secure' | 'turbo';
+
 export interface SecureDBConfig {
   path: string;
   size?: number;
   maxKeys?: number;
   keySize?: number;
+  mode?: DBMode;
 }
 
 export interface RangeQueryResult {

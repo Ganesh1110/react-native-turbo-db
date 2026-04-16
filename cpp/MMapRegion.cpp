@@ -59,7 +59,7 @@ void MMapRegion::close() {
     }
 }
 
-void MMapRegion::sync(size_t offset, size_t length) {
+void MMapRegion::sync(size_t offset, size_t length, bool async) {
     if (!mapped_) return;
     
     void* target_addr = base_addr_;
@@ -70,7 +70,11 @@ void MMapRegion::sync(size_t offset, size_t length) {
         sync_len = length;
     }
     
-    ::msync(target_addr, sync_len, MS_SYNC);
+    if (async) {
+        ::msync(target_addr, sync_len, MS_ASYNC);
+    } else {
+        ::msync(target_addr, sync_len, MS_SYNC);
+    }
 }
 
 void MMapRegion::write(size_t offset, const std::string& data) {

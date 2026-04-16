@@ -16,8 +16,8 @@ public:
     // Unmap memory and close
     void close();
 
-    // Sync a region of memory back to disk
-    void sync(size_t offset = 0, size_t length = 0);
+    // Sync a region of memory back to disk (async=true for MS_ASYNC, false for MS_SYNC)
+    void sync(size_t offset = 0, size_t length = 0, bool async = false);
 
     // Read/Write accessors
     void write(size_t offset, const std::string& data);

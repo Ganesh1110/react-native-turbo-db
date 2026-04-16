@@ -29,16 +29,20 @@ public class SecureDBModule extends NativeSecureDBSpec {
         }
     }
 
-    private native void nativeInstall(long jsiRuntimePointer);
+    private native void nativeInstall(long jsiRuntimePointer, int installMode);
 
     @Override
     public boolean install() {
+        return install(0);
+    }
+    
+    public boolean install(int mode) {
         ReactApplicationContext context = getReactApplicationContext();
         if (context != null && context.getJavaScriptContextHolder() != null) {
             long jsiRuntimePointer = context.getJavaScriptContextHolder().get();
             if (jsiRuntimePointer != 0) {
-                android.util.Log.i("SecureDB", "Installing JSI Engine with runtime pointer: " + jsiRuntimePointer);
-                nativeInstall(jsiRuntimePointer);
+                android.util.Log.i("SecureDB", "Installing JSI Engine with runtime pointer: " + jsiRuntimePointer + ", mode: " + mode);
+                nativeInstall(jsiRuntimePointer, mode);
                 return true;
             } else {
                 android.util.Log.e("SecureDB", "JSI Runtime pointer is null (0)");

@@ -17,8 +17,8 @@ const BenchmarkPage = () => {
   const [results, setResults] = useState<Record<string, number[]>>({});
   const [isRunning, setIsRunning] = useState<'SecureDB' | 'MMKV' | null>(null);
 
-  const NUM_OPERATIONS = 1000;
-  const NUM_QUERIES = 2000;
+  const NUM_OPERATIONS = 2000;
+  const NUM_QUERIES = 1000;
 
   const runSecureDBBenchmark = async () => {
     setIsRunning('SecureDB');

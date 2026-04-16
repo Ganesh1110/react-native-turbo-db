@@ -499,26 +499,19 @@ facebook::jsi::Value DBEngine::setMulti(facebook::jsi::Runtime& runtime, const f
             size_t offset = next_free_offset_;
             size_t serialized_size = arena_.size();
             
-            size_t payload_len = serialized_size;
+// Use encryption (but skip WAL for speed)
+            uint32_t payload_len = serialized_size;
             const uint8_t* payload_ptr = arena_.data();
             std::vector<uint8_t> encrypted;
-
+            
             if (crypto_) {
                 encrypted = crypto_->encrypt(arena_.data(), serialized_size);
                 payload_ptr = encrypted.data();
                 payload_len = encrypted.size();
             }
             
-            uint32_t len32 = static_cast<uint32_t>(payload_len);
-            
-            // Log to WAL (batched internally by std::ofstream)
-            if (wal_) {
-                wal_->logPageWrite(offset, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
-                wal_->logPageWrite(offset + sizeof(uint32_t), payload_ptr, payload_len);
-            }
-            
             // Direct MMap Write (Memory-only, OS handles flushing)
-            mmap_->write(offset, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
+            mmap_->write(offset, reinterpret_cast<const uint8_t*>(&payload_len), sizeof(uint32_t));
             mmap_->write(offset + sizeof(uint32_t), payload_ptr, payload_len);
             
             next_free_offset_ += sizeof(uint32_t) + payload_len;
@@ -527,9 +520,8 @@ facebook::jsi::Value DBEngine::setMulti(facebook::jsi::Runtime& runtime, const f
             btree_->insert(key, offset);
         }
         
-        if (wal_) {
-            wal_->logCommit(); // Single flush for the entire batch
-        }
+        // TURBO MODE: Flush immediately for speed
+        btree_->flush();
         
         pbtree_->setNextFreeOffset(next_free_offset_);
         
