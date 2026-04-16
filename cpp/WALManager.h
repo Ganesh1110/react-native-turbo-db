@@ -30,6 +30,7 @@ public:
 
     // Log a write operation to the WAL
     void logPageWrite(uint64_t offset, const std::string& data);
+    void logPageWrite(uint64_t offset, const uint8_t* data, size_t length);
     
     // Log a commit marker
     void logCommit();
@@ -51,7 +52,7 @@ private:
     std::ofstream wal_file_;
     SecureCryptoContext* crypto_;
     
-    void appendRecord(const WALRecordHeader& header, const std::string& payload);
+    void appendRecord(const WALRecordHeader& header, const uint8_t* payload, size_t length);
     uint32_t calculate_crc32(const uint8_t* data, size_t length);
 };
 

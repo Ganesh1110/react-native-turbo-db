@@ -21,7 +21,10 @@ public:
 
     // Read/Write accessors
     void write(size_t offset, const std::string& data);
+    void write(size_t offset, const uint8_t* data, size_t length);
+    
     std::string read(size_t offset, size_t length);
+    const uint8_t* get_address(size_t offset) const;
 
     // Property accessors
     std::string getPath() const { return path_; }

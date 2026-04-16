@@ -11038,13 +11038,14 @@ __metadata:
   languageName: node
   linkType: hard
 
-"react-native-mmkv@npm:^3.0.0":
-  version: 3.3.3
-  resolution: "react-native-mmkv@npm:3.3.3"
+"react-native-mmkv@npm:^4.3.1":
+  version: 4.3.1
+  resolution: "react-native-mmkv@npm:4.3.1"
   peerDependencies:
     react: "*"
     react-native: "*"
-  checksum: 10c0/efd7f725674d686ea126a213bd8c4270e8e4e8f306917a1b846a9f7ddf652ad057c7d509a9292d7bbf6a58603d4ab5a18e0c3b0d1b00447df45eeac81cbbd1e1
+    react-native-nitro-modules: "*"
+  checksum: 10c0/cfafff8e9837e9244c4544fcf26d8570f66539e97ade7ee9cfd2dc51328b6e793357a29a8336bf6f5a540f894780726ae404fef5059756b157ea3cee2fce6566
   languageName: node
   linkType: hard
 
@@ -11055,6 +11056,16 @@ __metadata:
     escape-string-regexp: "npm:^5.0.0"
     fast-glob: "npm:^3.3.3"
   checksum: 10c0/42dd8de1bb976c794fe1124ab08fba4645f189c7bdbdcd24dc0e05b639591e690891f89e5dba33c57691840365af85b48004c29c1c128ff195a95e766bb9752e
+  languageName: node
+  linkType: hard
+
+"react-native-nitro-modules@npm:^0.35.4":
+  version: 0.35.4
+  resolution: "react-native-nitro-modules@npm:0.35.4"
+  peerDependencies:
+    react: "*"
+    react-native: "*"
+  checksum: 10c0/dffb64c1b349d21feb8a33546cde48e3c5d92e04e120f733c178d4afa26ef6de652c6236a4eed0da7ca842ac9815afaa0708f57ae1454d881397e5d0575031c2
   languageName: node
   linkType: hard
 
@@ -11078,26 +11089,17 @@ __metadata:
     react-dom: "npm:19.2.3"
     react-native: "npm:0.85.0"
     react-native-builder-bob: "npm:^0.41.0"
-    react-native-mmkv: "npm:^3.0.0"
+    react-native-mmkv: "npm:^4.3.1"
     react-native-monorepo-config: "npm:^0.3.3"
-    react-native-secure-db: "file:./react-native-secure-db-0.1.10.tgz"
+    react-native-nitro-modules: "npm:^0.35.4"
+    react-native-secure-db: "workspace:*"
     react-native-web: "npm:~0.21.1"
     vite: "npm:^7.1.1"
     vite-plugin-commonjs: "npm:^0.10.4"
   languageName: unknown
   linkType: soft
 
-"react-native-secure-db@file:./react-native-secure-db-0.1.10.tgz::locator=react-native-secure-db-example%40workspace%3Aexample":
-  version: 0.1.0
-  resolution: "react-native-secure-db@file:./react-native-secure-db-0.1.10.tgz#./react-native-secure-db-0.1.10.tgz::hash=697f82&locator=react-native-secure-db-example%40workspace%3Aexample"
-  peerDependencies:
-    react: "*"
-    react-native: "*"
-  checksum: 10c0/0efbf5b1ea49f0c0a1f2f8d29abb90ae720b850bbc681befbfb43a959259cd671f58487fca858d6c84efb13bb781568d76897cbf12287f7a9697e748cb82eb3f
-  languageName: node
-  linkType: hard
-
-"react-native-secure-db@workspace:.":
+"react-native-secure-db@workspace:*, react-native-secure-db@workspace:.":
   version: 0.0.0-use.local
   resolution: "react-native-secure-db@workspace:."
   dependencies:

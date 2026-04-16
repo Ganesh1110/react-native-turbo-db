@@ -25,6 +25,15 @@ public:
                              uint8_t* out_buffer, size_t& out_length) = 0;
     virtual bool decryptInto(const uint8_t* ciphertext, size_t length,
                              uint8_t* out_buffer, size_t& out_length) = 0;
+
+    // LRU-cached decryption by record offset
+    virtual std::vector<uint8_t> decryptAtOffset(const uint8_t* ciphertext, size_t length, uint64_t record_offset) {
+        return decrypt(ciphertext, length);
+    }
+    virtual bool decryptIntoAtOffset(const uint8_t* ciphertext, size_t length, uint64_t record_offset,
+                                     uint8_t* out_buffer, size_t& out_length) {
+        return decryptInto(ciphertext, length, out_buffer, out_length);
+    }
 };
 
 }

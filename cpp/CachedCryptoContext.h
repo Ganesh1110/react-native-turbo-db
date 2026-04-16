@@ -21,9 +21,9 @@ public:
     bool decryptInto(const uint8_t* ciphertext, size_t length,
                      uint8_t* out_buffer, size_t& out_length) override;
 
-    std::vector<uint8_t> decryptAtOffset(const uint8_t* ciphertext, size_t length, uint64_t record_offset);
+    std::vector<uint8_t> decryptAtOffset(const uint8_t* ciphertext, size_t length, uint64_t record_offset) override;
     bool decryptIntoAtOffset(const uint8_t* ciphertext, size_t length, uint64_t record_offset,
-                             uint8_t* out_buffer, size_t& out_length);
+                             uint8_t* out_buffer, size_t& out_length) override;
 
     void invalidatePage(uint64_t record_offset);
     void clearCache();

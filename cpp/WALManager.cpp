@@ -28,30 +28,37 @@ uint32_t WALManager::calculate_crc32(const uint8_t* data, size_t length) {
     return ~crc;
 }
 
-void WALManager::appendRecord(const WALRecordHeader& header, const std::string& payload) {
+void WALManager::appendRecord(const WALRecordHeader& header, const uint8_t* payload, size_t length) {
     if (!wal_file_.is_open()) return;
     
     wal_file_.write(reinterpret_cast<const char*>(&header), sizeof(WALRecordHeader));
-    if (!payload.empty()) {
-        wal_file_.write(payload.data(), payload.size());
+    if (payload && length > 0) {
+        wal_file_.write(reinterpret_cast<const char*>(payload), length);
     }
 }
 
 void WALManager::logPageWrite(uint64_t offset, const std::string& data) {
-    std::string payload = data;
+    logPageWrite(offset, reinterpret_cast<const uint8_t*>(data.data()), data.size());
+}
+
+void WALManager::logPageWrite(uint64_t offset, const uint8_t* data, size_t length) {
+    const uint8_t* payload_ptr = data;
+    size_t payload_len = length;
+    std::vector<uint8_t> encrypted;
+
     if (crypto_) {
-        std::vector<uint8_t> encrypted = crypto_->encrypt(
-            reinterpret_cast<const uint8_t*>(data.data()), data.size());
-        payload.assign(reinterpret_cast<const char*>(encrypted.data()), encrypted.size());
+        encrypted = crypto_->encrypt(data, length);
+        payload_ptr = encrypted.data();
+        payload_len = encrypted.size();
     }
 
     WALRecordHeader header;
-    header.length = sizeof(WALRecordHeader) + payload.size();
+    header.length = sizeof(WALRecordHeader) + payload_len;
     header.type = WALRecordType::PAGE_WRITE;
     header.offset = offset;
-    header.checksum = calculate_crc32(reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+    header.checksum = calculate_crc32(payload_ptr, payload_len);
 
-    appendRecord(header, payload);
+    appendRecord(header, payload_ptr, payload_len);
 }
 
 void WALManager::logCommit() {
@@ -61,7 +68,7 @@ void WALManager::logCommit() {
     header.offset = 0;
     header.checksum = 0;
 
-    appendRecord(header, "");
+    appendRecord(header, nullptr, 0);
     wal_file_.flush();
 }
 

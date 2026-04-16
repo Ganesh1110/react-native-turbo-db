@@ -344,37 +344,28 @@ facebook::jsi::Value DBEngine::insertRecInternal(facebook::jsi::Runtime& runtime
         size_t offset = next_free_offset_;
         size_t serialized_size = arena_.size();
         
-        // Reserve space for: nonce (24) + ciphertext + mac (16)
-        size_t encrypted_max = 24 + serialized_size + 16;
-        arena_.reserve(encrypted_max);
-        
-        size_t encrypted_len = 0;
+        size_t payload_len = serialized_size;
+        const uint8_t* payload_ptr = arena_.data();
+        std::vector<uint8_t> encrypted;
+
         if (crypto_) {
-            crypto_->encryptInto(arena_.data(), serialized_size, 
-                                 arena_.data() + serialized_size, encrypted_len);
-        } else {
-            std::memcpy(arena_.data() + serialized_size, arena_.data(), serialized_size);
-            encrypted_len = serialized_size;
+            encrypted = crypto_->encrypt(arena_.data(), serialized_size);
+            payload_ptr = encrypted.data();
+            payload_len = encrypted.size();
         }
         
-        size_t payload_len = encrypted_len;
         uint32_t len32 = static_cast<uint32_t>(payload_len);
         
-        char len_buf[4];
-        std::memcpy(len_buf, &len32, 4);
-        
-        const char* data_start = reinterpret_cast<const char*>(arena_.data() + (crypto_ ? serialized_size : 0));
-        
         if (wal_) {
-            wal_->logPageWrite(offset, std::string(len_buf, 4));
-            wal_->logPageWrite(offset + 4, std::string(data_start, payload_len));
+            wal_->logPageWrite(offset, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
+            wal_->logPageWrite(offset + sizeof(uint32_t), payload_ptr, payload_len);
         }
         
-        mmap_->write(offset, std::string(len_buf, 4));
-        mmap_->write(offset + 4, std::string(data_start, payload_len));
+        mmap_->write(offset, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
+        mmap_->write(offset + sizeof(uint32_t), payload_ptr, payload_len);
         
         // Push the needle cursor to point cleanly behind the record
-        next_free_offset_ += 4 + payload_len;
+        next_free_offset_ += sizeof(uint32_t) + payload_len;
         pbtree_->setNextFreeOffset(next_free_offset_);
         
         // Step 4: Trigger the zero-latency queued background logic
@@ -401,18 +392,21 @@ facebook::jsi::Value DBEngine::findRec(facebook::jsi::Runtime& runtime, const st
         size_t offset = btree_->find(key);
         if (offset == 0) return facebook::jsi::Value::undefined();
         
-        std::string len_bytes = mmap_->read(offset, sizeof(uint32_t));
+        const uint8_t* len_ptr = mmap_->get_address(offset);
+        if (!len_ptr) return facebook::jsi::Value::undefined();
+
         uint32_t payload_len;
-        std::memcpy(&payload_len, len_bytes.data(), sizeof(uint32_t));
+        std::memcpy(&payload_len, len_ptr, sizeof(uint32_t));
         
-        std::string data_bytes = mmap_->read(offset + sizeof(uint32_t), payload_len);
+        const uint8_t* payload_ptr = mmap_->get_address(offset + sizeof(uint32_t));
+        if (!payload_ptr) return facebook::jsi::Value::undefined();
         
         std::shared_ptr<std::vector<uint8_t>> decrypted;
         if (crypto_) {
-            auto decrypted_vec = crypto_->decryptAtOffset(reinterpret_cast<const uint8_t*>(data_bytes.data()), payload_len, offset);
+            auto decrypted_vec = crypto_->decryptAtOffset(payload_ptr, payload_len, offset);
             decrypted = std::make_shared<std::vector<uint8_t>>(std::move(decrypted_vec));
         } else {
-            decrypted = std::make_shared<std::vector<uint8_t>>(data_bytes.begin(), data_bytes.end());
+            decrypted = std::make_shared<std::vector<uint8_t>>(payload_ptr, payload_ptr + payload_len);
         }
         
         if (!decrypted->empty() && static_cast<BinaryType>((*decrypted)[0]) == BinaryType::Object) {
@@ -435,6 +429,8 @@ facebook::jsi::Value DBEngine::findRec(facebook::jsi::Runtime& runtime, const st
 bool DBEngine::clearStorage() {
     if (!mmap_) return false;
     
+    // Note: Already holding rw_mutex_ from JSI call, don't re-lock
+    
     std::string path = mmap_->getPath();
     size_t size = mmap_->getSize();
     
@@ -448,8 +444,11 @@ bool DBEngine::clearStorage() {
     
     // 2. Remove files
     std::remove(path.c_str());
+    std::remove((path + ".idx").c_str());
     std::remove((path + ".wal").c_str());
     
+    next_free_offset_ = 0;
+
     // 3. Re-initialize
     return initStorage(path, size);
 }
@@ -536,18 +535,21 @@ std::vector<std::pair<std::string, facebook::jsi::Value>> DBEngine::rangeQuery(
     auto rangeResults = btree_->range(startKey, endKey);
     for (const auto& [key, offset] : rangeResults) {
         if (offset > 0) {
-            std::string len_bytes = mmap_->read(offset, sizeof(uint32_t));
+            const uint8_t* len_ptr = mmap_->get_address(offset);
+            if (!len_ptr) continue;
+
             uint32_t payload_len;
-            std::memcpy(&payload_len, len_bytes.data(), sizeof(uint32_t));
+            std::memcpy(&payload_len, len_ptr, sizeof(uint32_t));
             
-            std::string data_bytes = mmap_->read(offset + sizeof(uint32_t), payload_len);
+            const uint8_t* payload_ptr = mmap_->get_address(offset + sizeof(uint32_t));
+            if (!payload_ptr) continue;
             
             std::shared_ptr<std::vector<uint8_t>> decrypted;
             if (crypto_) {
-                auto decrypted_vec = crypto_->decryptAtOffset(reinterpret_cast<const uint8_t*>(data_bytes.data()), payload_len, offset);
+                auto decrypted_vec = crypto_->decryptAtOffset(payload_ptr, payload_len, offset);
                 decrypted = std::make_shared<std::vector<uint8_t>>(std::move(decrypted_vec));
             } else {
-                decrypted = std::make_shared<std::vector<uint8_t>>(data_bytes.begin(), data_bytes.end());
+                decrypted = std::make_shared<std::vector<uint8_t>>(payload_ptr, payload_ptr + payload_len);
             }
 
             if (!decrypted->empty() && static_cast<BinaryType>((*decrypted)[0]) == BinaryType::Object) {
