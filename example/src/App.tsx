@@ -12,26 +12,24 @@ import {
   Platform,
 } from 'react-native';
 import { SecureDB } from 'react-native-secure-db';
-import { createMMKV } from 'react-native-mmkv';
 
 const BenchmarkPage = () => {
-  const [results, setResults] = useState<Record<string, number[]>>({});
-  const [isRunning, setIsRunning] = useState<'SecureDB' | 'MMKV' | null>(null);
+  const [results, setResults] = useState<number[]>([]);
+  const [isRunning, setIsRunning] = useState(false);
 
   const NUM_OPERATIONS = 1000;
   const NUM_QUERIES = 2000;
 
-  const runSecureDBBenchmark = async () => {
-    setIsRunning('SecureDB');
+  const runBenchmark = async () => {
+    setIsRunning(true);
 
     const docsDir = SecureDB.getDocumentsDirectory();
     const secureDB = new SecureDB(
-      `${docsDir}/bench_turbo_secure.db`,
+      `${docsDir}/bench_turbo_standalone.db`,
       20 * 1024 * 1024
     );
     secureDB.clear();
     
-    // Preparation
     const entries: Record<string, any> = {};
     for (let i = 0; i < NUM_OPERATIONS; i++) {
       entries[`key_${i}`] = { id: i, data: Math.random().toString(36), val: Math.random() };
@@ -39,124 +37,67 @@ const BenchmarkPage = () => {
 
     const times: number[] = [];
 
-    // Bulk Insert
     const insertStart = Date.now();
     secureDB.setMulti(entries);
     times.push(Date.now() - insertStart);
 
-    // Random Reads
     const readStart = Date.now();
     for (let i = 0; i < NUM_QUERIES; i++) {
       secureDB.get(`key_${Math.floor(Math.random() * NUM_OPERATIONS)}`);
     }
     times.push(Date.now() - readStart);
 
-    // Native Range Query
     const rangeStart = Date.now();
     secureDB.rangeQuery('key_100', 'key_300');
     times.push(Date.now() - rangeStart);
 
-    // Bulk Delete
     const deleteStart = Date.now();
     secureDB.clear();
     times.push(Date.now() - deleteStart);
 
-    setResults(prev => ({ ...prev, SecureDB: times }));
-    setIsRunning(null);
-  };
-
-  const runMMKVBenchmark = async () => {
-    setIsRunning('MMKV');
-    const mmkv = createMMKV({ id: 'bench_turbo_mmkv' });
-    mmkv.clearAll();
-
-    const data: Array<{k: string, v: string}> = [];
-    for (let i = 0; i < NUM_OPERATIONS; i++) {
-      data.push({ k: `key_${i}`, v: JSON.stringify({ id: i, data: Math.random().toString(36), val: Math.random() }) });
-    }
-
-    const times: number[] = [];
-
-    // Bulk Insert
-    const insertStart = Date.now();
-    for (let i = 0; i < NUM_OPERATIONS; i++) {
-      mmkv.set(data[i].k, data[i].v);
-    }
-    times.push(Date.now() - insertStart);
-
-    // Random Reads
-    const readStart = Date.now();
-    for (let i = 0; i < NUM_QUERIES; i++) {
-      mmkv.getString(`key_${Math.floor(Math.random() * NUM_OPERATIONS)}`);
-    }
-    times.push(Date.now() - readStart);
-
-    // Range Query (MMKV polyfill)
-    const rangeStart = Date.now();
-    const all = mmkv.getAllKeys();
-    all.filter(k => k >= 'key_100' && k <= 'key_300').map(k => mmkv.getString(k));
-    times.push(Date.now() - rangeStart);
-
-    // Bulk Delete
-    const deleteStart = Date.now();
-    mmkv.clearAll();
-    times.push(Date.now() - deleteStart);
-
-    setResults(prev => ({ ...prev, MMKV: times }));
-    setIsRunning(null);
+    setResults(times);
+    setIsRunning(false);
   };
 
   const formatTime = (ms: number | undefined) => (ms === undefined ? '-' : `${ms}ms`);
 
-  const Row = ({ label, sIdx }: { label: string; sIdx: number }) => (
+  const Row = ({ label, idx }: { label: string; idx: number }) => (
     <View style={styles.resultRow}>
       <Text style={styles.resultLabel}>{label}</Text>
-      <Text style={[styles.resultValue, styles.secureDBColor]}>{formatTime(results.SecureDB?.[sIdx])}</Text>
-      <Text style={[styles.resultValue, styles.mmkvColor]}>{formatTime(results.MMKV?.[sIdx])}</Text>
+      <Text style={[styles.resultValue, styles.secureDBColor]}>{formatTime(results[idx])}</Text>
     </View>
   );
 
   return (
     <View style={styles.benchmarkCard}>
       <View style={styles.benchmarkHeader}>
-        <Text style={styles.cardTitle}>Turbo Mode Performance</Text>
-        <Text style={styles.benchmarkSubtitle}>{NUM_OPERATIONS} ops | {NUM_QUERIES} queries</Text>
+        <Text style={styles.cardTitle}>Performance Lab</Text>
+        <Text style={styles.benchmarkSubtitle}>{NUM_OPERATIONS} records | {NUM_QUERIES} reads</Text>
       </View>
 
-      <View style={styles.benchmarkButtonRow}>
-        <TouchableOpacity 
-          style={[styles.benchmarkButton, styles.splitButton, isRunning === 'SecureDB' && styles.benchmarkButtonDisabled]} 
-          onPress={runSecureDBBenchmark}
-          disabled={!!isRunning}
-        >
-          {isRunning === 'SecureDB' ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.benchmarkButtonText}>SecureDB</Text>}
-        </TouchableOpacity>
-
-        <TouchableOpacity 
-          style={[styles.benchmarkButton, styles.splitButton, { backgroundColor: '#F472B6' }, isRunning === 'MMKV' && styles.benchmarkButtonDisabled]} 
-          onPress={runMMKVBenchmark}
-          disabled={!!isRunning}
-        >
-          {isRunning === 'MMKV' ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.benchmarkButtonText}>MMKV</Text>}
-        </TouchableOpacity>
-      </View>
+      <TouchableOpacity 
+        style={[styles.benchmarkButton, isRunning && styles.benchmarkButtonDisabled]} 
+        onPress={runBenchmark}
+        disabled={isRunning}
+      >
+        {isRunning ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.benchmarkButtonText}>Run Native Benchmark</Text>}
+      </TouchableOpacity>
 
       <View style={styles.resultTable}>
         <View style={styles.resultHeader}>
           <Text style={[styles.resultLabel, { color: '#94A3B8' }]}>Operation</Text>
-          <Text style={styles.resultHeaderCell}>SecureDB</Text>
-          <Text style={styles.resultHeaderCell}>MMKV</Text>
+          <Text style={styles.resultHeaderCell}>Duration</Text>
         </View>
-        <Row label="Bulk Insert" sIdx={0} />
-        <Row label="Random Read" sIdx={1} />
-        <Row label="Range Query" sIdx={2} />
-        <Row label="Bulk Delete" sIdx={3} />
+        <Row label="Bulk Insert" idx={0} />
+        <Row label="Random Read" idx={1} />
+        <Row label="Range Query" idx={2} />
+        <Row label="Bulk Delete" idx={3} />
       </View>
 
-      {results.SecureDB && results.MMKV && (
+      {results.length > 0 && (
         <View style={styles.winnerBanner}>
           <Text style={styles.winnerText}>
-            🏆 SecureDB wins {results.SecureDB.filter((v, i) => v <= (results.MMKV?.[i] ?? 0)).length} / 4 rounds
+            ⚡ Turbo Mode Active: Average {((results.reduce((a,b)=>a+b,0))/4).toFixed(1)}ms per sequence
           </Text>
         </View>
       )}
@@ -354,7 +295,6 @@ const styles = StyleSheet.create({
   benchmarkSubtitle: { color: '#64748B', fontSize: 11, marginTop: 4, fontWeight: '600' },
   benchmarkButtonRow: { flexDirection: 'row', gap: 10, marginBottom: 20 },
   benchmarkButton: { backgroundColor: '#38BDF8', paddingVertical: 15, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
-  splitButton: { flex: 1 },
   benchmarkButtonDisabled: { opacity: 0.5 },
   benchmarkButtonText: { color: '#fff', fontSize: 13, fontWeight: '900' },
   resultTable: { borderRadius: 16, overflow: 'hidden', backgroundColor: '#020617', padding: 10 },
@@ -364,7 +304,6 @@ const styles = StyleSheet.create({
   resultLabel: { flex: 1, color: '#64748B', fontSize: 11, fontWeight: '700' },
   resultValue: { flex: 1, fontSize: 11, fontWeight: '800', textAlign: 'center' },
   secureDBColor: { color: '#38BDF8' },
-  mmkvColor: { color: '#F472B6' },
   winnerBanner: { backgroundColor: 'rgba(34, 197, 94, 0.1)', padding: 12, borderRadius: 12, marginTop: 20 },
   winnerText: { color: '#22C55E', fontSize: 12, fontWeight: '900', textAlign: 'center' },
 });
