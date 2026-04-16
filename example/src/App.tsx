@@ -6,43 +6,22 @@ import {
   TouchableOpacity,
   View,
   ScrollView,
-  ActivityIndicator,
+  TextInput,
   Alert,
 } from 'react-native';
 import { SecureDB } from 'react-native-secure-db';
-// @ts-ignore - Assuming MMKV is installed in the project environment
-import { MMKV } from 'react-native-mmkv';
-
-const ITEM_COUNT = 1000; // Reduced for smoother UI during mixed tests
-
-interface BenchResult {
-  write: number;
-  read: number;
-}
 
 export default function App() {
-  const [isRunning, setIsRunning] = useState(false);
-  const [secureDBResults, setSecureDBResults] = useState<BenchResult | null>(
-    null
-  );
-  const [mmkvResults, setMmkvResults] = useState<BenchResult | null>(null);
+  const [key, setKey] = useState('');
+  const [value, setValue] = useState('');
   const [dbPath, setDbPath] = useState('');
   const [allKeys, setAllKeys] = useState<string[]>([]);
-  const [rangeResults, setRangeResults] = useState<any[]>([]);
+  const [getResult, setGetResult] = useState<string>('');
 
   const db = useMemo(() => {
     const docPath = SecureDB.getDocumentsDirectory();
     const dbFile = `${docPath}/secure_v1.db`;
     return new SecureDB(dbFile, 10 * 1024 * 1024); // 10MB
-  }, []);
-
-  const mmkv = useMemo(() => {
-    try {
-      return new MMKV();
-    } catch {
-      console.warn('MMKV not available, skipping that part of the benchmark');
-      return null;
-    }
   }, []);
 
   useEffect(() => {
@@ -60,136 +39,98 @@ export default function App() {
     }
   };
 
-  const runBenchmark = async () => {
-    setIsRunning(true);
-    setSecureDBResults(null);
-    setMmkvResults(null);
-
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    const testData = {
-      id: 'user_' + Math.random().toString(36).substr(2, 9),
-      name: 'Benchmark User',
-      balance: 1234.56,
-      metadata: { role: 'admin', level: 99 },
-      tags: ['jsi', 'secure', 'fast', 'sodium'],
-    };
-
-    // --- SecureDB Benchmark ---
-    try {
-      console.log('Starting SecureDB clear...');
-      db.clear();
-      console.log('SecureDB clear done.');
-
-      const sWriteStart = performance.now();
-      for (let i = 0; i < ITEM_COUNT; i++) {
-        if (i % 100 === 0) console.log(`SecureDB writing: ${i}/${ITEM_COUNT}`);
-        db.set(`key_${i.toString().padStart(4, '0')}`, testData);
-      }
-      console.log('SecureDB flushing...');
-      db.flush();
-      const sWriteEnd = performance.now();
-      console.log('SecureDB write benchmark done.');
-
-      const sReadStart = performance.now();
-      for (let i = 0; i < ITEM_COUNT; i++) {
-        if (i % 100 === 0) console.log(`SecureDB reading: ${i}/${ITEM_COUNT}`);
-        db.get(`key_${i.toString().padStart(4, '0')}`);
-      }
-      const sReadEnd = performance.now();
-      console.log('SecureDB read benchmark done.');
-      setSecureDBResults({
-        write: sWriteEnd - sWriteStart,
-        read: sReadEnd - sReadStart,
-      });
-      refreshKeys();
-    } catch (e) {
-      console.error('SecureDB Bench Error:', e);
-      Alert.alert('SecureDB Error', String(e));
+  const handleSet = () => {
+    if (!key) {
+      Alert.alert('Error', 'Please enter a key');
+      return;
     }
-
-    // --- MMKV Benchmark ---
-    if (mmkv) {
+    try {
+      // We can store objects, strings, numbers, etc.
+      // If value looks like JSON, parse it, else store as string
+      let dataToStore: any = value;
       try {
-        mmkv.clearAll();
-        const jsonStr = JSON.stringify(testData);
-
-        const mWriteStart = performance.now();
-        for (let i = 0; i < ITEM_COUNT; i++) {
-          mmkv.set(`key_${i.toString().padStart(4, '0')}`, jsonStr);
-        }
-        const mWriteEnd = performance.now();
-
-        const mReadStart = performance.now();
-        for (let i = 0; i < ITEM_COUNT; i++) {
-          const val = mmkv.getString(`key_${i.toString().padStart(4, '0')}`);
-          if (val) JSON.parse(val);
-        }
-        const mReadEnd = performance.now();
-
-        setMmkvResults({
-          write: mWriteEnd - mWriteStart,
-          read: mReadEnd - mReadStart,
-        });
-      } catch (e) {
-        console.error('MMKV Bench Error:', e);
+        dataToStore = JSON.parse(value);
+      } catch {
+        dataToStore = value;
       }
-    }
 
-    setIsRunning(false);
-  };
-
-  const testRangeQuery = () => {
-    try {
-      // Query keys between key_0010 and key_0020
-      const results = db.rangeQuery('key_0010', 'key_0020');
-      setRangeResults(results);
-      Alert.alert(
-        'Range Query',
-        `Found ${results.length} items in range [key_0010, key_0020]`
-      );
+      const success = db.set(key, dataToStore);
+      if (success) {
+        Alert.alert('Success', `Stored key: ${key}`);
+        setKey('');
+        setValue('');
+        refreshKeys();
+      } else {
+        Alert.alert('Error', 'Failed to store value');
+      }
     } catch (e) {
-      console.error('Range Query Error:', e);
+      Alert.alert('Error', String(e));
     }
   };
 
-  const handleFlush = () => {
-    db.flush();
-    Alert.alert('Success', 'Write buffer flushed to disk tree.');
+  const handleGet = () => {
+    if (!key) {
+      Alert.alert('Error', 'Please enter a key to retrieve');
+      return;
+    }
+    try {
+      const result = db.get(key);
+      if (result === undefined) {
+        setGetResult('Key not found');
+      } else {
+        setGetResult(JSON.stringify(result, null, 2));
+      }
+    } catch (e) {
+      Alert.alert('Error', String(e));
+    }
   };
 
-  const renderStatRow = (
-    label: string,
-    secureVal?: number,
-    mmkvVal?: number
-  ) => (
-    <View style={styles.statRow}>
-      <Text style={styles.statRowLabel}>{label}</Text>
-      <View style={styles.statValues}>
-        <View style={styles.valBox}>
-          <Text style={styles.valText}>
-            {secureVal ? `${secureVal.toFixed(1)}ms` : '--'}
-          </Text>
-          <Text style={styles.valSubText}>SecureDB</Text>
-        </View>
-        <View style={styles.valBox}>
-          <Text style={[styles.valText, styles.mmkvColor]}>
-            {mmkvVal ? `${mmkvVal.toFixed(1)}ms` : '--'}
-          </Text>
-          <Text style={styles.valSubText}>MMKV</Text>
-        </View>
-      </View>
-    </View>
-  );
+  const handleDelete = () => {
+    if (!key) {
+      Alert.alert('Error', 'Please enter a key to delete');
+      return;
+    }
+    try {
+      const success = db.remove(key);
+      if (success) {
+        Alert.alert('Success', `Deleted key: ${key}`);
+        setKey('');
+        setGetResult('');
+        refreshKeys();
+      } else {
+        Alert.alert('Error', 'Key not found or failed to delete');
+      }
+    } catch (e) {
+      Alert.alert('Error', String(e));
+    }
+  };
+
+  const handleClearAll = () => {
+    Alert.alert('Confirm', 'Are you sure you want to delete everything?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete All',
+        style: 'destructive',
+        onPress: () => {
+          try {
+            db.clear();
+            setAllKeys([]);
+            setGetResult('');
+            Alert.alert('Success', 'Database cleared');
+          } catch (e) {
+            Alert.alert('Error', String(e));
+          }
+        },
+      },
+    ]);
+  };
 
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <View style={styles.header}>
           <Text style={styles.title}>SecureDB</Text>
-          <Text style={styles.subtitle}>
-            JSI + Libsodium + MMAP ({ITEM_COUNT} ops)
-          </Text>
+          <Text style={styles.subtitle}>Native JSI CRUD Demo</Text>
         </View>
 
         <View style={styles.metaCard}>
@@ -201,96 +142,108 @@ export default function App() {
           >
             {dbPath || 'Loading...'}
           </Text>
-          <View style={{ height: 8 }} />
-          <Text style={styles.metaLabel}>Total Keys:</Text>
-          <Text style={styles.metaValue}>{allKeys.length}</Text>
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Performance Comparison</Text>
-          {renderStatRow(
-            'Bulk Write',
-            secureDBResults?.write,
-            mmkvResults?.write
-          )}
-          <View style={styles.divider} />
-          {renderStatRow('Bulk Read', secureDBResults?.read, mmkvResults?.read)}
-        </View>
+          <Text style={styles.cardTitle}>Operations</Text>
 
-        <View style={styles.actionRow}>
+          <Text style={styles.inputLabel}>Key</Text>
+          <TextInput
+            style={styles.input}
+            value={key}
+            onChangeText={setKey}
+            placeholder="Enter key..."
+            placeholderTextColor="#475569"
+          />
+
+          <Text style={styles.inputLabel}>Value (String or JSON)</Text>
+          <TextInput
+            style={[styles.input, { height: 80 }]}
+            value={value}
+            onChangeText={setValue}
+            placeholder='e.g. "Hello" or {"id": 1}'
+            placeholderTextColor="#475569"
+            multiline
+          />
+
+          <View style={styles.buttonRow}>
+            <TouchableOpacity style={styles.button} onPress={handleSet}>
+              <Text style={styles.buttonText}>Set</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.button, { backgroundColor: '#38BDF8' }]}
+              onPress={handleGet}
+            >
+              <Text style={[styles.buttonText, { color: '#fff' }]}>Get</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.button, { backgroundColor: '#EF4444' }]}
+              onPress={handleDelete}
+            >
+              <Text style={[styles.buttonText, { color: '#fff' }]}>Delete</Text>
+            </TouchableOpacity>
+          </View>
+
           <TouchableOpacity
             style={[
-              styles.button,
-              isRunning && styles.buttonDisabled,
-              { flex: 2 },
+              styles.outlineButton,
+              { marginTop: 12, borderColor: '#EF4444' },
             ]}
-            onPress={runBenchmark}
-            disabled={isRunning}
+            onPress={handleClearAll}
           >
-            {isRunning ? (
-              <ActivityIndicator color="#020617" />
-            ) : (
-              <Text style={styles.buttonText}>Run Benchmark</Text>
-            )}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.secondaryButton, { flex: 1, marginLeft: 12 }]}
-            onPress={handleFlush}
-          >
-            <Text style={styles.secondaryButtonText}>Flush</Text>
+            <Text style={[styles.outlineButtonText, { color: '#EF4444' }]}>
+              Clear Entire Database
+            </Text>
           </TouchableOpacity>
         </View>
 
-        <View style={styles.actionRow}>
-          <TouchableOpacity
-            style={styles.outlineButton}
-            onPress={testRangeQuery}
-          >
-            <Text style={styles.outlineButtonText}>Test Range Query</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.outlineButton, { marginLeft: 12 }]}
-            onPress={refreshKeys}
-          >
-            <Text style={styles.outlineButtonText}>Refresh Keys</Text>
-          </TouchableOpacity>
-        </View>
-
-        {rangeResults.length > 0 && (
-          <View style={styles.rangeCard}>
-            <Text style={styles.cardTitle}>Range Query Snippet</Text>
-            {rangeResults.slice(0, 3).map((item, i) => (
-              <Text key={i} style={styles.rangeText}>
-                {item.key}: {JSON.stringify(item.value).substring(0, 40)}...
-              </Text>
-            ))}
+        {getResult !== '' && (
+          <View style={styles.resultCard}>
+            <Text style={styles.cardTitle}>Get Result</Text>
+            <Text style={styles.resultText}>{getResult}</Text>
           </View>
         )}
 
+        <View style={styles.card}>
+          <View style={styles.rowBetween}>
+            <Text style={styles.cardTitle}>All Keys ({allKeys.length})</Text>
+            <TouchableOpacity onPress={refreshKeys}>
+              <Text style={styles.refreshText}>Refresh</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.keyList}>
+            {allKeys.length === 0 ? (
+              <Text style={styles.emptyText}>No keys stored yet.</Text>
+            ) : (
+              allKeys.map((k) => (
+                <TouchableOpacity
+                  key={k}
+                  onPress={() => setKey(k)}
+                  style={styles.keyItem}
+                >
+                  <Text style={styles.keyText}>• {k}</Text>
+                </TouchableOpacity>
+              ))
+            )}
+          </View>
+        </View>
+
         <View style={styles.infoBox}>
-          <Text style={styles.infoTitle}>Architecture Highlights</Text>
+          <Text style={styles.infoTitle}>Architecture Summary</Text>
           <Text style={styles.infoText}>
-            •{' '}
-            <Text style={{ fontWeight: 'bold', color: '#fff' }}>
-              Sodium XChaCha20-Poly1305:
-            </Text>{' '}
-            AEAD encryption at the block level.
+            • <Text style={styles.boldWhite}>XChaCha20-Poly1305:</Text>{' '}
+            Authenticated encryption for all data blocks.
           </Text>
           <Text style={styles.infoText}>
-            •{' '}
-            <Text style={{ fontWeight: 'bold', color: '#fff' }}>
-              Page-Level WAL:
-            </Text>{' '}
-            Write Ahead Logging ensures atomicity even on crash.
+            • <Text style={styles.boldWhite}>Memory-Mapped (MMAP):</Text> Direct
+            kernel-level file access for high performance.
           </Text>
           <Text style={styles.infoText}>
-            •{' '}
-            <Text style={{ fontWeight: 'bold', color: '#fff' }}>
-              Hybrid B+ Tree:
-            </Text>{' '}
-            Buffered writes with disk-persisted B+ Tree indexing.
+            • <Text style={styles.boldWhite}>Zero-Copy JSI:</Text> Synchronous
+            native communication without bridge overhead.
           </Text>
         </View>
       </ScrollView>
@@ -343,53 +296,46 @@ const styles = StyleSheet.create({
     color: '#F8FAFC',
     fontSize: 16,
     fontWeight: 'bold',
-    marginBottom: 20,
+    marginBottom: 16,
   },
-  statRow: { marginVertical: 8 },
-  statRowLabel: {
-    color: '#475569',
+
+  inputLabel: {
+    color: '#94A3B8',
     fontSize: 12,
-    fontWeight: 'bold',
-    marginBottom: 10,
+    marginBottom: 8,
+    fontWeight: '600',
   },
-  statValues: { flexDirection: 'row', justifyContent: 'space-between' },
-  valBox: { flex: 1 },
-  valText: { color: '#38BDF8', fontSize: 22, fontWeight: 'bold' },
-  mmkvColor: { color: '#F472B6' },
-  valSubText: { color: '#475569', fontSize: 11, marginTop: 2 },
-  divider: { height: 1, backgroundColor: '#1E293B', marginVertical: 12 },
-
-  actionRow: { flexDirection: 'row', marginBottom: 12 },
-  button: {
-    backgroundColor: '#F8FAFC',
-    paddingVertical: 16,
+  input: {
+    backgroundColor: '#020617',
     borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  buttonDisabled: { opacity: 0.5 },
-  buttonText: { color: '#020617', fontSize: 16, fontWeight: 'bold' },
-
-  secondaryButton: {
-    backgroundColor: '#1E293B',
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  secondaryButtonText: { color: '#F8FAFC', fontSize: 16, fontWeight: 'bold' },
-
-  outlineButton: {
-    flex: 1,
+    padding: 12,
+    color: '#F8FAFC',
+    fontSize: 16,
+    marginBottom: 16,
     borderWidth: 1,
     borderColor: '#334155',
-    paddingVertical: 12,
-    borderRadius: 12,
-    alignItems: 'center',
   },
-  outlineButtonText: { color: '#94A3B8', fontSize: 14, fontWeight: '500' },
 
-  rangeCard: {
+  buttonRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  button: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginHorizontal: 4,
+  },
+  buttonText: { color: '#020617', fontSize: 14, fontWeight: 'bold' },
+
+  outlineButton: {
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+  },
+  outlineButtonText: { fontSize: 14, fontWeight: 'bold' },
+
+  resultCard: {
     backgroundColor: 'rgba(56, 189, 248, 0.05)',
     padding: 20,
     borderRadius: 16,
@@ -397,15 +343,32 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(56, 189, 248, 0.1)',
   },
-  rangeText: {
-    color: '#38BDF8',
-    fontSize: 12,
-    fontFamily: 'monospace',
-    marginBottom: 6,
+  resultText: { color: '#38BDF8', fontSize: 14, fontFamily: 'monospace' },
+
+  rowBetween: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  refreshText: { color: '#38BDF8', fontSize: 14, fontWeight: 'bold' },
+
+  keyList: { marginTop: 8 },
+  keyItem: {
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
+  },
+  keyText: { color: '#94A3B8', fontSize: 14 },
+  emptyText: {
+    color: '#475569',
+    fontSize: 14,
+    fontStyle: 'italic',
+    textAlign: 'center',
   },
 
   infoBox: {
-    marginTop: 20,
+    marginTop: 10,
     padding: 20,
     backgroundColor: '#0F172A',
     borderRadius: 16,
@@ -422,4 +385,5 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     marginBottom: 10,
   },
+  boldWhite: { fontWeight: 'bold', color: '#fff' },
 });
