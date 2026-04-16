@@ -3,7 +3,6 @@
 #include <string>
 #include <cstdint>
 #include <vector>
-
 #include <unordered_map>
 #include <mutex>
 #include <memory>
@@ -11,6 +10,26 @@
 namespace secure_db {
 
 uint32_t calculate_crc32(const uint8_t* data, size_t length);
+
+#pragma pack(push, 1)
+struct TreeHeader {
+    uint64_t magic;
+    uint64_t root_offset;
+    uint64_t free_list_head;
+    uint64_t next_free_offset;
+    uint32_t height;
+    uint32_t node_count;
+    uint32_t checksum;
+};
+#pragma pack(pop)
+
+struct BTreeNodeConfig {
+    uint32_t max_keys = 32;
+    uint32_t key_size = 64;
+    
+    BTreeNodeConfig() = default;
+    BTreeNodeConfig(uint32_t mk, uint32_t ks) : max_keys(mk), key_size(ks) {}
+};
 
 struct BTreeNode {
     bool is_leaf;
