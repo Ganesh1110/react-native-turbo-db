@@ -9,7 +9,6 @@ declare const global: {
     insertRec(key: string, obj: any): boolean;
     findRec(key: string): any;
     clearStorage(): boolean;
-    benchmark(): number;
     setMulti(entries: Record<string, any>): boolean;
     getMultiple(keys: string[]): Record<string, any>;
     remove(key: string): boolean;
@@ -143,11 +142,6 @@ export class SecureDB {
   flush(): void {
     this.ensureInitialized();
     global.NativeDB.flush();
-  }
-
-  benchmark(): number {
-    this.ensureInitialized();
-    return global.NativeDB.benchmark();
   }
 }
 

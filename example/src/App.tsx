@@ -9,6 +9,7 @@ import {
   TextInput,
   Alert,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { SecureDB } from 'react-native-secure-db';
 import { createMMKV } from 'react-native-mmkv';
@@ -25,313 +26,139 @@ const BenchmarkPage = () => {
 
     const docsDir = SecureDB.getDocumentsDirectory();
     const secureDB = new SecureDB(
-      `${docsDir}/bench_secure_v2.db`,
+      `${docsDir}/bench_turbo_secure.db`,
       20 * 1024 * 1024
     );
     secureDB.clear();
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const secureDBTimes = await benchmarkSecureDB(secureDB);
+    
+    // Preparation
+    const entries: Record<string, any> = {};
+    for (let i = 0; i < NUM_OPERATIONS; i++) {
+      entries[`key_${i}`] = { id: i, data: Math.random().toString(36), val: Math.random() };
+    }
 
-    setResults((prev) => ({ ...prev, SecureDB: secureDBTimes }));
+    const times: number[] = [];
+
+    // Bulk Insert
+    const insertStart = Date.now();
+    secureDB.setMulti(entries);
+    times.push(Date.now() - insertStart);
+
+    // Random Reads
+    const readStart = Date.now();
+    for (let i = 0; i < NUM_QUERIES; i++) {
+      secureDB.get(`key_${Math.floor(Math.random() * NUM_OPERATIONS)}`);
+    }
+    times.push(Date.now() - readStart);
+
+    // Native Range Query
+    const rangeStart = Date.now();
+    secureDB.rangeQuery('key_100', 'key_300');
+    times.push(Date.now() - rangeStart);
+
+    // Bulk Delete
+    const deleteStart = Date.now();
+    secureDB.clear();
+    times.push(Date.now() - deleteStart);
+
+    setResults(prev => ({ ...prev, SecureDB: times }));
     setIsRunning(null);
   };
 
   const runMMKVBenchmark = async () => {
     setIsRunning('MMKV');
-
-    const mmkv = createMMKV({ id: 'bench_mmkv_v2' });
+    const mmkv = createMMKV({ id: 'bench_turbo_mmkv' });
     mmkv.clearAll();
-    const mmkvTimes = await benchmarkMMKV(mmkv);
 
-    setResults((prev) => ({ ...prev, MMKV: mmkvTimes }));
-    setIsRunning(null);
-  };
-
-  const benchmarkSecureDB = async (db: SecureDB): Promise<number[]> => {
-    const times: number[] = [];
-
-    // Preparation (OUTSIDE timer)
-    const entries: Record<string, any> = {};
+    const data: Array<{k: string, v: string}> = [];
     for (let i = 0; i < NUM_OPERATIONS; i++) {
-      entries[`secure_key_${i}`] = {
-        id: i,
-        name: `Item ${i}`,
-        value: Math.random(),
-      };
+      data.push({ k: `key_${i}`, v: JSON.stringify({ id: i, data: Math.random().toString(36), val: Math.random() }) });
     }
 
-    // Bulk Insert (Optimized with setMulti)
+    const times: number[] = [];
+
+    // Bulk Insert
     const insertStart = Date.now();
-    db.setMulti(entries);
-    const insertEnd = Date.now();
-    times.push(insertEnd - insertStart);
+    for (let i = 0; i < NUM_OPERATIONS; i++) {
+      mmkv.set(data[i].k, data[i].v);
+    }
+    times.push(Date.now() - insertStart);
 
     // Random Reads
     const readStart = Date.now();
     for (let i = 0; i < NUM_QUERIES; i++) {
-      const key = `secure_key_${Math.floor(Math.random() * NUM_OPERATIONS)}`;
-      db.get(key);
+      mmkv.getString(`key_${Math.floor(Math.random() * NUM_OPERATIONS)}`);
     }
-    const readEnd = Date.now();
-    times.push(readEnd - readStart);
+    times.push(Date.now() - readStart);
 
-    // Range Query (True Native Range)
+    // Range Query (MMKV polyfill)
     const rangeStart = Date.now();
-    db.rangeQuery('secure_key_100', 'secure_key_200');
-    const rangeEnd = Date.now();
-    times.push(rangeEnd - rangeStart);
-
-    // Bulk Delete (Optimized)
-    const deleteStart = Date.now();
-    db.clear();
-    const deleteEnd = Date.now();
-    times.push(deleteEnd - deleteStart);
-
-    return times;
-  };
-
-  const benchmarkMMKV = async (
-    mmkv: ReturnType<typeof createMMKV>
-  ): Promise<number[]> => {
-    const times: number[] = [];
-
-    // Preparation (OUTSIDE timer to match SecureDB)
-    const data: Array<{ key: string; val: string }> = [];
-    for (let i = 0; i < NUM_OPERATIONS; i++) {
-      data.push({
-        key: `mmkv_key_${i}`,
-        val: JSON.stringify({ id: i, name: `Item ${i}`, value: Math.random() }),
-      });
-    }
-
-    // Bulk Insert (MMKV doesn't have setMulti for objects, so we loop)
-    const insertStart = Date.now();
-    for (let i = 0; i < NUM_OPERATIONS; i++) {
-      const item = data[i];
-      if (item) {
-        mmkv.set(item.key, item.val);
-      }
-    }
-    const insertEnd = Date.now();
-    times.push(insertEnd - insertStart);
-
-    // Random Reads
-    const readStart = Date.now();
-    for (let i = 0; i < NUM_QUERIES; i++) {
-      const key = `mmkv_key_${Math.floor(Math.random() * NUM_OPERATIONS)}`;
-      mmkv.getString(key);
-    }
-    const readEnd = Date.now();
-    times.push(readEnd - readStart);
-
-    // Range Query (MMKV approximation)
-    const rangeStart = Date.now();
-    const allKeys = mmkv.getAllKeys();
-    allKeys
-      .filter((k) => k >= 'mmkv_key_100' && k <= 'mmkv_key_200')
-      .map((k) => mmkv.getString(k));
-    const rangeEnd = Date.now();
-    times.push(rangeEnd - rangeStart);
+    const all = mmkv.getAllKeys();
+    all.filter(k => k >= 'key_100' && k <= 'key_300').map(k => mmkv.getString(k));
+    times.push(Date.now() - rangeStart);
 
     // Bulk Delete
     const deleteStart = Date.now();
     mmkv.clearAll();
-    const deleteEnd = Date.now();
-    times.push(deleteEnd - deleteStart);
+    times.push(Date.now() - deleteStart);
 
-    return times;
+    setResults(prev => ({ ...prev, MMKV: times }));
+    setIsRunning(null);
   };
 
-  const formatTime = (ms: number) => {
-    if (ms < 1000) return `${ms}ms`;
-    return `${(ms / 1000).toFixed(2)}s`;
-  };
+  const formatTime = (ms: number | undefined) => (ms === undefined ? '-' : `${ms}ms`);
 
-  const renderResultRow = (
-    label: string,
-    secureDBTime: number | undefined,
-    mmkvTime: number | undefined
-  ) => (
+  const Row = ({ label, sIdx }: { label: string; sIdx: number }) => (
     <View style={styles.resultRow}>
       <Text style={styles.resultLabel}>{label}</Text>
-      <View style={styles.resultValues}>
-        <Text style={[styles.resultValue, styles.secureDBColor]}>
-          {secureDBTime !== undefined ? formatTime(secureDBTime) : '-'}
-        </Text>
-        <Text style={[styles.resultValue, styles.mmkvColor]}>
-          {mmkvTime !== undefined ? formatTime(mmkvTime) : '-'}
-        </Text>
-      </View>
+      <Text style={[styles.resultValue, styles.secureDBColor]}>{formatTime(results.SecureDB?.[sIdx])}</Text>
+      <Text style={[styles.resultValue, styles.mmkvColor]}>{formatTime(results.MMKV?.[sIdx])}</Text>
     </View>
   );
-
-  const getWinCounts = () => {
-    const wins = { secureDB: 0, mmkv: 0 };
-    const labels = ['Bulk Insert', 'Random Read', 'Range Query', 'Bulk Delete'];
-    labels.forEach((_, idx) => {
-      const s = results.SecureDB?.[idx] ?? Infinity;
-      const m = results.MMKV?.[idx] ?? Infinity;
-      if (s <= m) wins.secureDB++;
-      else wins.mmkv++;
-    });
-    return wins;
-  };
-
-  const wins = getWinCounts();
 
   return (
     <View style={styles.benchmarkCard}>
       <View style={styles.benchmarkHeader}>
-        <Text style={styles.cardTitle}>Performance Benchmark</Text>
-        <Text style={styles.benchmarkSubtitle}>
-          {NUM_OPERATIONS} inserts, {NUM_QUERIES} queries
-        </Text>
+        <Text style={styles.cardTitle}>Turbo Mode Performance</Text>
+        <Text style={styles.benchmarkSubtitle}>{NUM_OPERATIONS} ops | {NUM_QUERIES} queries</Text>
       </View>
 
       <View style={styles.benchmarkButtonRow}>
-        <TouchableOpacity
-          style={[
-            styles.benchmarkButton,
-            styles.splitButton,
-            isRunning === 'SecureDB' && styles.benchmarkButtonDisabled,
-          ]}
+        <TouchableOpacity 
+          style={[styles.benchmarkButton, styles.splitButton, isRunning === 'SecureDB' && styles.benchmarkButtonDisabled]} 
           onPress={runSecureDBBenchmark}
-          disabled={isRunning !== null}
+          disabled={!!isRunning}
         >
-          {isRunning === 'SecureDB' ? (
-            <View style={styles.runningContainer}>
-              <ActivityIndicator size="small" color="#fff" />
-              <Text style={styles.benchmarkButtonText}> Running...</Text>
-            </View>
-          ) : (
-            <Text style={styles.benchmarkButtonText}>SecureDB Benchmark</Text>
-          )}
+          {isRunning === 'SecureDB' ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.benchmarkButtonText}>SecureDB</Text>}
         </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[
-            styles.benchmarkButton,
-            styles.splitButton,
-            isRunning === 'MMKV' && styles.benchmarkButtonDisabled,
-          ]}
+        <TouchableOpacity 
+          style={[styles.benchmarkButton, styles.splitButton, { backgroundColor: '#F472B6' }, isRunning === 'MMKV' && styles.benchmarkButtonDisabled]} 
           onPress={runMMKVBenchmark}
-          disabled={isRunning !== null}
+          disabled={!!isRunning}
         >
-          {isRunning === 'MMKV' ? (
-            <View style={styles.runningContainer}>
-              <ActivityIndicator size="small" color="#fff" />
-              <Text style={styles.benchmarkButtonText}> Running...</Text>
-            </View>
-          ) : (
-            <Text style={styles.benchmarkButtonText}>MMKV Benchmark</Text>
-          )}
+          {isRunning === 'MMKV' ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.benchmarkButtonText}>MMKV</Text>}
         </TouchableOpacity>
       </View>
 
-      {results.SecureDB && (
-        <View style={styles.resultSection}>
-          <Text style={styles.resultSectionTitle}>SecureDB Results</Text>
-          <View style={styles.resultTable}>
-            <View style={styles.resultHeader}>
-              <Text style={[styles.resultLabel, { flex: 2 }]}>Operation</Text>
-              <Text style={[styles.resultHeaderCell, { flex: 1 }]}>Time</Text>
-            </View>
-            <View style={styles.resultRow}>
-              <Text style={[styles.resultLabel, { flex: 2 }]}>Bulk Insert</Text>
-              <Text
-                style={[styles.resultValue, styles.secureDBColor, { flex: 1 }]}
-              >
-                {formatTime(results.SecureDB[0]!)}
-              </Text>
-            </View>
-            <View style={styles.resultRow}>
-              <Text style={[styles.resultLabel, { flex: 2 }]}>Random Read</Text>
-              <Text
-                style={[styles.resultValue, styles.secureDBColor, { flex: 1 }]}
-              >
-                {formatTime(results.SecureDB[1]!)}
-              </Text>
-            </View>
-            <View style={styles.resultRow}>
-              <Text style={[styles.resultLabel, { flex: 2 }]}>Range Query</Text>
-              <Text
-                style={[styles.resultValue, styles.secureDBColor, { flex: 1 }]}
-              >
-                {formatTime(results.SecureDB[2]!)}
-              </Text>
-            </View>
-          </View>
+      <View style={styles.resultTable}>
+        <View style={styles.resultHeader}>
+          <Text style={[styles.resultLabel, { color: '#94A3B8' }]}>Operation</Text>
+          <Text style={styles.resultHeaderCell}>SecureDB</Text>
+          <Text style={styles.resultHeaderCell}>MMKV</Text>
         </View>
-      )}
-
-      {results.MMKV && (
-        <View style={styles.resultSection}>
-          <Text style={styles.resultSectionTitle}>MMKV Results</Text>
-          <View style={styles.resultTable}>
-            <View style={styles.resultHeader}>
-              <Text style={[styles.resultLabel, { flex: 2 }]}>Operation</Text>
-              <Text style={[styles.resultHeaderCell, { flex: 1 }]}>Time</Text>
-            </View>
-            <View style={styles.resultRow}>
-              <Text style={[styles.resultLabel, { flex: 2 }]}>Bulk Insert</Text>
-              <Text style={[styles.resultValue, styles.mmkvColor, { flex: 1 }]}>
-                {formatTime(results.MMKV[0]!)}
-              </Text>
-            </View>
-            <View style={styles.resultRow}>
-              <Text style={[styles.resultLabel, { flex: 2 }]}>Random Read</Text>
-              <Text style={[styles.resultValue, styles.mmkvColor, { flex: 1 }]}>
-                {formatTime(results.MMKV[1]!)}
-              </Text>
-            </View>
-            <View style={styles.resultRow}>
-              <Text style={[styles.resultLabel, { flex: 2 }]}>Range Query</Text>
-              <Text style={[styles.resultValue, styles.mmkvColor, { flex: 1 }]}>
-                {formatTime(results.MMKV[2]!)}
-              </Text>
-            </View>
-          </View>
-        </View>
-      )}
+        <Row label="Bulk Insert" sIdx={0} />
+        <Row label="Random Read" sIdx={1} />
+        <Row label="Range Query" sIdx={2} />
+        <Row label="Bulk Delete" sIdx={3} />
+      </View>
 
       {results.SecureDB && results.MMKV && (
-        <>
-          <View style={styles.winnerBanner}>
-            <Text style={styles.winnerText}>
-              🏆 SecureDB: {wins.secureDB} | MMKV: {wins.mmkv}
-            </Text>
-          </View>
-
-          <View style={styles.resultTable}>
-            <View style={styles.resultHeader}>
-              <Text style={[styles.resultLabel, { flex: 1 }]}>Operation</Text>
-              <Text style={[styles.resultHeaderCell, { flex: 1 }]}>
-                SecureDB
-              </Text>
-              <Text style={[styles.resultHeaderCell, { flex: 1 }]}>MMKV</Text>
-            </View>
-            {renderResultRow(
-              'Bulk Insert',
-              results.SecureDB?.[0],
-              results.MMKV?.[0]
-            )}
-            {renderResultRow(
-              'Random Read',
-              results.SecureDB?.[1],
-              results.MMKV?.[1]
-            )}
-            {renderResultRow(
-              'Range Query',
-              results.SecureDB?.[2],
-              results.MMKV?.[2]
-            )}
-            {renderResultRow(
-              'Bulk Delete',
-              results.SecureDB?.[3],
-              results.MMKV?.[3]
-            )}
-          </View>
-        </>
+        <View style={styles.winnerBanner}>
+          <Text style={styles.winnerText}>
+            🏆 SecureDB wins {results.SecureDB.filter((v, i) => v <= (results.MMKV?.[i] ?? 0)).length} / 4 rounds
+          </Text>
+        </View>
       )}
     </View>
   );
@@ -345,6 +172,8 @@ export default function App() {
   const [allKeys, setAllKeys] = useState<string[]>([]);
   const [getResult, setGetResult] = useState<string>('');
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [rangeStart, setRangeStart] = useState('a');
+  const [rangeEnd, setRangeEnd] = useState('z');
 
   const db = useMemo(() => {
     const docPath = SecureDB.getDocumentsDirectory();
@@ -354,8 +183,7 @@ export default function App() {
 
   const refreshKeys = useCallback(() => {
     try {
-      const keys = db.getAllKeys();
-      setAllKeys(keys);
+      setAllKeys(db.getAllKeys());
     } catch (e) {
       console.error('Refresh Keys Error:', e);
     }
@@ -367,131 +195,33 @@ export default function App() {
   }, [refreshKeys]);
 
   const handleSet = () => {
-    if (!key) {
-      Alert.alert('Error', 'Please enter a key');
-      return;
-    }
+    if (!key) return Alert.alert('Error', 'Key required');
     try {
-      let dataToStore: unknown = value;
-      try {
-        dataToStore = JSON.parse(value);
-      } catch {
-        dataToStore = value;
+      const data = value.startsWith('{') || value.startsWith('[') ? JSON.parse(value) : value;
+      if (db.set(key, data)) {
+        setKey(''); setValue(''); refreshKeys();
       }
-
-      const success = db.set(key, dataToStore);
-      if (success) {
-        Alert.alert('Success', `Stored key: ${key}`);
-        setKey('');
-        setValue('');
-        refreshKeys();
-      } else {
-        Alert.alert('Error', 'Failed to store value');
-      }
-    } catch (e) {
-      Alert.alert('Error', String(e));
-    }
+    } catch (e) { Alert.alert('Error', String(e)); }
   };
 
   const handleGet = () => {
-    if (!key) {
-      Alert.alert('Error', 'Please enter a key to retrieve');
-      return;
-    }
-    try {
-      const result = db.get(key);
-      if (result === undefined) {
-        setGetResult('Key not found');
-      } else {
-        setGetResult(JSON.stringify(result, null, 2));
-      }
-    } catch (e) {
-      Alert.alert('Error', String(e));
-    }
+    const res = db.get(key);
+    setGetResult(res === undefined ? 'Not found' : JSON.stringify(res, null, 2));
   };
 
-  const handleDelete = () => {
-    if (!key) {
-      Alert.alert('Error', 'Please enter a key to delete');
-      return;
-    }
-    try {
-      const success = db.remove(key);
-      if (success) {
-        Alert.alert('Success', `Deleted key: ${key}`);
-        setKey('');
-        setGetResult('');
-        refreshKeys();
-      } else {
-        Alert.alert('Error', 'Key not found or failed to delete');
-      }
-    } catch (e) {
-      Alert.alert('Error', String(e));
-    }
+  const handleRange = () => {
+    const results = db.rangeQuery(rangeStart, rangeEnd);
+    Alert.alert('Range Query', `Found ${results.length} items. Check console for details.`);
+    console.log('Range Results:', results);
   };
 
-  const handleClearAll = () => {
-    Alert.alert('Confirm', 'Are you sure you want to delete everything?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete All',
-        style: 'destructive',
-        onPress: () => {
-          try {
-            db.clear();
-            setAllKeys([]);
-            setGetResult('');
-            Alert.alert('Success', 'Database cleared');
-          } catch (e) {
-            Alert.alert('Error', String(e));
-          }
-        },
-      },
-    ]);
-  };
-
-  const handleBatchInsert = () => {
-    const count = 100;
+  const handleTurboInsert = () => {
     const start = Date.now();
-    for (let i = 0; i < count; i++) {
-      db.set(`batch_${i}`, {
-        id: i,
-        name: `Batch Item ${i}`,
-        timestamp: Date.now(),
-      });
-    }
-    const elapsed = Date.now() - start;
-    Alert.alert(
-      'Batch Insert Complete',
-      `Inserted ${count} records in ${elapsed}ms`
-    );
+    const batch: Record<string, any> = {};
+    for(let i=0; i<500; i++) batch[`turbo_${i}`] = { id: i, ts: Date.now() };
+    db.setMulti(batch);
+    Alert.alert('Turbo Success', `Inserted 500 records in ${Date.now() - start}ms`);
     refreshKeys();
-  };
-
-  const handleRangeQuery = () => {
-    const startKey = 'batch_0';
-    const endKey = 'batch_50';
-    const start = Date.now();
-    const keys = db.getAllKeys();
-    const filteredKeys = keys.filter((k) => k >= startKey && k <= endKey);
-    const results = filteredKeys.slice(0, 10).map((k) => db.get(k));
-    const elapsed = Date.now() - start;
-    Alert.alert(
-      'Range Query Complete',
-      `Found ${results.length} records in ${elapsed}ms`
-    );
-  };
-
-  const handleMultiGet = () => {
-    const keys = allKeys.slice(0, 20);
-    const start = Date.now();
-    const results = keys.map((k) => ({ key: k, value: db.get(k) }));
-    const elapsed = Date.now() - start;
-    Alert.alert(
-      'Multi-Get Complete',
-      `Retrieved ${results.length} records in ${elapsed}ms`
-    );
-    setGetResult(`Retrieved ${results.length} records in ${elapsed}ms`);
   };
 
   return (
@@ -499,219 +229,86 @@ export default function App() {
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <View style={styles.header}>
           <Text style={styles.title}>SecureDB</Text>
-          <Text style={styles.subtitle}>Universal Embedded Database</Text>
+          <Text style={styles.subtitle}>Native Turbo Engine</Text>
         </View>
 
         <View style={styles.tabContainer}>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'demo' && styles.activeTab]}
-            onPress={() => setActiveTab('demo')}
-          >
-            <Text
-              style={[
-                styles.tabText,
-                activeTab === 'demo' && styles.activeTabText,
-              ]}
+          {['demo', 'benchmark'].map((tab) => (
+            <TouchableOpacity 
+              key={tab} 
+              style={[styles.tab, activeTab === tab && styles.activeTab]} 
+              onPress={() => setActiveTab(tab as any)}
             >
-              Usage Demo
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'benchmark' && styles.activeTab]}
-            onPress={() => setActiveTab('benchmark')}
-          >
-            <Text
-              style={[
-                styles.tabText,
-                activeTab === 'benchmark' && styles.activeTabText,
-              ]}
-            >
-              Benchmarks
-            </Text>
-          </TouchableOpacity>
+              <Text style={[styles.tabText, activeTab === tab && styles.activeTabText]}>
+                {tab.toUpperCase()}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </View>
 
         {activeTab === 'demo' ? (
           <>
             <View style={styles.metaCard}>
-              <Text style={styles.metaLabel}>Storage Path:</Text>
-              <Text
-                style={styles.metaValue}
-                numberOfLines={1}
-                ellipsizeMode="middle"
-              >
-                {dbPath || 'Loading...'}
-              </Text>
+              <Text style={styles.metaLabel}>PATH: {Platform.OS.toUpperCase()}</Text>
+              <Text style={styles.metaValue} numberOfLines={1}>{dbPath}</Text>
             </View>
 
             <View style={styles.card}>
-              <Text style={styles.cardTitle}>Basic Operations</Text>
-
-              <Text style={styles.inputLabel}>Key</Text>
-              <TextInput
-                style={styles.input}
-                value={key}
-                onChangeText={setKey}
-                placeholder="Enter key..."
-                placeholderTextColor="#475569"
-              />
-
-              <Text style={styles.inputLabel}>Value (String or JSON)</Text>
-              <TextInput
-                style={[styles.input, { height: 80 }]}
-                value={value}
-                onChangeText={setValue}
-                placeholder='e.g. "Hello" or {"id": 1}'
-                placeholderTextColor="#475569"
-                multiline
-              />
-
-              <View style={styles.benchmarkButtonRow}>
-                <TouchableOpacity style={styles.button} onPress={handleSet}>
-                  <Text style={styles.buttonText}>Set</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.button, { backgroundColor: '#38BDF8' }]}
-                  onPress={handleGet}
-                >
-                  <Text style={[styles.buttonText, { color: '#fff' }]}>
-                    Get
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.button, { backgroundColor: '#EF4444' }]}
-                  onPress={handleDelete}
-                >
-                  <Text style={[styles.buttonText, { color: '#fff' }]}>
-                    Delete
-                  </Text>
-                </TouchableOpacity>
+              <Text style={styles.cardTitle}>Instant Access</Text>
+              <TextInput style={styles.input} value={key} onChangeText={setKey} placeholder="Key..." placeholderTextColor="#475569" />
+              <TextInput style={[styles.input, { height: 60 }]} value={value} onChangeText={setValue} placeholder="Value (String or JSON)..." placeholderTextColor="#475569" multiline />
+              
+              <View style={styles.buttonRow}>
+                <TouchableOpacity style={styles.button} onPress={handleSet}><Text style={styles.buttonText}>SET</Text></TouchableOpacity>
+                <TouchableOpacity style={[styles.button, { backgroundColor: '#38BDF8' }]} onPress={handleGet}><Text style={[styles.buttonText, { color: '#fff' }]}>GET</Text></TouchableOpacity>
+                <TouchableOpacity style={[styles.button, { backgroundColor: '#EF4444' }]} onPress={() => { db.remove(key); refreshKeys(); }}><Text style={[styles.buttonText, { color: '#fff' }]}>DEL</Text></TouchableOpacity>
               </View>
-
-              <TouchableOpacity
-                style={[
-                  styles.outlineButton,
-                  { marginTop: 12, borderColor: '#EF4444' },
-                ]}
-                onPress={handleClearAll}
-              >
-                <Text style={[styles.outlineButtonText, { color: '#EF4444' }]}>
-                  Clear Entire Database
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.card}>
-              <TouchableOpacity
-                style={styles.advancedToggle}
-                onPress={() => setShowAdvanced(!showAdvanced)}
-              >
-                <Text style={styles.cardTitle}>Advanced Operations</Text>
-                <Text style={styles.toggleArrow}>
-                  {showAdvanced ? '▼' : '▶'}
-                </Text>
-              </TouchableOpacity>
-
-              {showAdvanced && (
-                <View style={styles.advancedContent}>
-                  <TouchableOpacity
-                    style={styles.advancedButton}
-                    onPress={handleBatchInsert}
-                  >
-                    <Text style={styles.advancedButtonText}>
-                      Batch Insert (100 records)
-                    </Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.advancedButton}
-                    onPress={handleRangeQuery}
-                  >
-                    <Text style={styles.advancedButtonText}>
-                      Range Query (batch_0 to batch_50)
-                    </Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.advancedButton}
-                    onPress={handleMultiGet}
-                  >
-                    <Text style={styles.advancedButtonText}>
-                      Multi-Get (first 20 keys)
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              )}
             </View>
 
             {getResult !== '' && (
               <View style={styles.resultCard}>
-                <Text style={styles.cardTitle}>Get Result</Text>
                 <Text style={styles.resultText}>{getResult}</Text>
               </View>
             )}
 
             <View style={styles.card}>
-              <View style={styles.rowBetween}>
-                <Text style={styles.cardTitle}>
-                  All Keys ({allKeys.length})
-                </Text>
-                <TouchableOpacity onPress={refreshKeys}>
-                  <Text style={styles.refreshText}>Refresh</Text>
-                </TouchableOpacity>
-              </View>
+              <TouchableOpacity style={styles.advancedToggle} onPress={() => setShowAdvanced(!showAdvanced)}>
+                <Text style={styles.cardTitle}>Turbo Extensions</Text>
+                <Text style={styles.toggleArrow}>{showAdvanced ? '▼' : '▲'}</Text>
+              </TouchableOpacity>
 
+              {showAdvanced && (
+                <View style={styles.advancedContent}>
+                  <Text style={styles.inputLabel}>Range Explorer</Text>
+                  <View style={styles.buttonRow}>
+                    <TextInput style={[styles.input, { flex: 1, marginBottom: 0 }]} value={rangeStart} onChangeText={setRangeStart} placeholder="Start" />
+                    <TextInput style={[styles.input, { flex: 1, marginBottom: 0 }]} value={rangeEnd} onChangeText={setRangeEnd} placeholder="End" />
+                  </View>
+                  <TouchableOpacity style={styles.advancedButton} onPress={handleRange}><Text style={styles.advancedButtonText}>Execute Native Range Query</Text></TouchableOpacity>
+                  <TouchableOpacity style={[styles.advancedButton, { borderColor: '#22C55E' }]} onPress={handleTurboInsert}><Text style={[styles.advancedButtonText, { color: '#22C55E' }]}>Bulk Turbo Insert (500 ops)</Text></TouchableOpacity>
+                  <TouchableOpacity style={[styles.advancedButton, { borderColor: '#EF4444' }]} onPress={() => { db.clear(); refreshKeys(); }}><Text style={[styles.advancedButtonText, { color: '#EF4444' }]}>Wipe Database</Text></TouchableOpacity>
+                </View>
+              )}
+            </View>
+
+            <View style={styles.card}>
+              <View style={styles.rowBetween}>
+                <Text style={styles.cardTitle}>Index Map ({allKeys.length})</Text>
+                <TouchableOpacity onPress={refreshKeys}><Text style={styles.refreshText}>↻ Sync</Text></TouchableOpacity>
+              </View>
               <View style={styles.keyList}>
-                {allKeys.length === 0 ? (
-                  <Text style={styles.emptyText}>No keys stored yet.</Text>
-                ) : (
-                  allKeys.slice(0, 50).map((k) => (
-                    <TouchableOpacity
-                      key={k}
-                      onPress={() => setKey(k)}
-                      style={styles.keyItem}
-                    >
-                      <Text style={styles.keyText}>• {k}</Text>
+                {allKeys.length === 0 ? <Text style={styles.emptyText}>Index empty.</Text> : 
+                  allKeys.slice(0, 15).map(k => (
+                    <TouchableOpacity key={k} onPress={() => setKey(k)} style={styles.keyItem}>
+                      <Text style={styles.keyText}>0x{Math.abs(k.split('').reduce((a,b)=>{a=((a<<5)-a)+b.charCodeAt(0);return a&a},0)).toString(16)} → {k}</Text>
                     </TouchableOpacity>
                   ))
-                )}
-                {allKeys.length > 50 && (
-                  <Text style={styles.moreKeysText}>
-                    + {allKeys.length - 50} more keys
-                  </Text>
-                )}
+                }
+                {allKeys.length > 15 && <Text style={styles.moreKeysText}>+ {allKeys.length - 15} items hidden</Text>}
               </View>
             </View>
-
-            <View style={styles.infoBox}>
-              <Text style={styles.infoTitle}>Architecture</Text>
-              <Text style={styles.infoText}>
-                • <Text style={styles.boldWhite}>XChaCha20-Poly1305:</Text> AEAD
-                encryption
-              </Text>
-              <Text style={styles.infoText}>
-                • <Text style={styles.boldWhite}>Memory-Mapped I/O:</Text>{' '}
-                Zero-copy reads
-              </Text>
-              <Text style={styles.infoText}>
-                • <Text style={styles.boldWhite}>B+ Tree Index:</Text> Fast
-                range queries
-              </Text>
-              <Text style={styles.infoText}>
-                • <Text style={styles.boldWhite}>LRU Decrypt Cache:</Text>{' '}
-                Optimized repeated reads
-              </Text>
-              <Text style={styles.infoText}>
-                • <Text style={styles.boldWhite}>JSI HostObject:</Text> Lazy
-                property access
-              </Text>
-            </View>
           </>
-        ) : (
-          <BenchmarkPage />
-        )}
+        ) : <BenchmarkPage />}
       </ScrollView>
     </SafeAreaView>
   );
@@ -719,238 +316,55 @@ export default function App() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#020617' },
-  scrollContent: { padding: 24 },
-  header: { alignItems: 'center', marginVertical: 20 },
-  title: {
-    fontSize: 42,
-    fontWeight: '900',
-    color: '#F8FAFC',
-    letterSpacing: -1,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: '#64748B',
-    marginTop: 4,
-    textTransform: 'uppercase',
-  },
-
-  tabContainer: {
-    flexDirection: 'row',
-    backgroundColor: '#0F172A',
-    borderRadius: 12,
-    padding: 4,
-    marginBottom: 20,
-  },
-  tab: { flex: 1, paddingVertical: 12, alignItems: 'center', borderRadius: 10 },
-  activeTab: { backgroundColor: '#38BDF8' },
-  tabText: { color: '#64748B', fontSize: 14, fontWeight: '600' },
-  activeTabText: { color: '#fff' },
-
-  metaCard: {
-    backgroundColor: '#0F172A',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 20,
-    borderLeftWidth: 4,
-    borderLeftColor: '#38BDF8',
-  },
-  metaLabel: {
-    color: '#475569',
-    fontSize: 11,
-    fontWeight: 'bold',
-    textTransform: 'uppercase',
-  },
-  metaValue: { color: '#94A3B8', fontSize: 13, marginTop: 2 },
-
-  card: {
-    backgroundColor: '#0F172A',
-    borderRadius: 24,
-    padding: 24,
-    borderWidth: 1,
-    borderColor: '#1E293B',
-    marginBottom: 20,
-  },
-  cardTitle: {
-    color: '#F8FAFC',
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 16,
-  },
-
-  inputLabel: {
-    color: '#94A3B8',
-    fontSize: 12,
-    marginBottom: 8,
-    fontWeight: '600',
-  },
-  input: {
-    backgroundColor: '#020617',
-    borderRadius: 12,
-    padding: 12,
-    color: '#F8FAFC',
-    fontSize: 16,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-
-  buttonRow: { flexDirection: 'row', justifyContent: 'space-between' },
-  button: {
-    flex: 1,
-    backgroundColor: '#F8FAFC',
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-    marginHorizontal: 4,
-  },
-  buttonText: { color: '#020617', fontSize: 14, fontWeight: 'bold' },
-
-  outlineButton: {
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-    borderWidth: 1,
-  },
-  outlineButtonText: { fontSize: 14, fontWeight: 'bold' },
-
-  resultCard: {
-    backgroundColor: 'rgba(56, 189, 248, 0.05)',
-    padding: 20,
-    borderRadius: 16,
-    marginBottom: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(56, 189, 248, 0.1)',
-  },
-  resultText: { color: '#38BDF8', fontSize: 14, fontFamily: 'monospace' },
-
-  rowBetween: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  refreshText: { color: '#38BDF8', fontSize: 14, fontWeight: 'bold' },
-
-  keyList: { marginTop: 8 },
-  keyItem: {
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1E293B',
-  },
-  keyText: { color: '#94A3B8', fontSize: 14 },
-  emptyText: {
-    color: '#475569',
-    fontSize: 14,
-    fontStyle: 'italic',
-    textAlign: 'center',
-  },
-  moreKeysText: {
-    color: '#64748B',
-    fontSize: 12,
-    textAlign: 'center',
-    marginTop: 8,
-  },
-
-  infoBox: {
-    marginTop: 10,
-    padding: 20,
-    backgroundColor: '#0F172A',
-    borderRadius: 16,
-  },
-  infoTitle: {
-    color: '#F8FAFC',
-    fontSize: 15,
-    fontWeight: 'bold',
-    marginBottom: 12,
-  },
-  infoText: {
-    color: '#64748B',
-    fontSize: 13,
-    lineHeight: 20,
-    marginBottom: 10,
-  },
-  boldWhite: { fontWeight: 'bold', color: '#fff' },
-
-  advancedToggle: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  toggleArrow: { color: '#64748B', fontSize: 12 },
-  advancedContent: { marginTop: 16 },
-  advancedButton: {
-    backgroundColor: '#020617',
-    padding: 14,
-    borderRadius: 10,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  advancedButtonText: { color: '#38BDF8', fontSize: 14, fontWeight: '600' },
-
-  benchmarkCard: { backgroundColor: '#0F172A', borderRadius: 24, padding: 24 },
+  scrollContent: { padding: 20 },
+  header: { alignItems: 'center', marginVertical: 30 },
+  title: { fontSize: 48, fontWeight: '900', color: '#F8FAFC', letterSpacing: -2 },
+  subtitle: { fontSize: 12, color: '#38BDF8', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: 2 },
+  tabContainer: { flexDirection: 'row', backgroundColor: '#0F172A', borderRadius: 16, padding: 6, marginBottom: 25 },
+  tab: { flex: 1, paddingVertical: 12, alignItems: 'center', borderRadius: 12 },
+  activeTab: { backgroundColor: '#1E293B', borderWidth: 1, borderColor: '#334155' },
+  tabText: { color: '#64748B', fontSize: 11, fontWeight: '800' },
+  activeTabText: { color: '#F8FAFC' },
+  metaCard: { backgroundColor: '#0F172A', borderRadius: 16, padding: 15, marginBottom: 20, borderLeftWidth: 3, borderLeftColor: '#38BDF8' },
+  metaLabel: { color: '#475569', fontSize: 10, fontWeight: '900' },
+  metaValue: { color: '#94A3B8', fontSize: 12, marginTop: 4, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  card: { backgroundColor: '#0F172A', borderRadius: 24, padding: 20, borderWidth: 1, borderColor: '#1E293B', marginBottom: 20 },
+  cardTitle: { color: '#F8FAFC', fontSize: 15, fontWeight: '800', marginBottom: 15 },
+  input: { backgroundColor: '#020617', borderRadius: 12, padding: 14, color: '#F8FAFC', fontSize: 15, marginBottom: 15, borderWidth: 1, borderColor: '#1E293B' },
+  inputLabel: { color: '#64748B', fontSize: 11, fontWeight: '700', marginBottom: 8, textTransform: 'uppercase' },
+  buttonRow: { flexDirection: 'row', gap: 10 },
+  button: { flex: 1, backgroundColor: '#F8FAFC', paddingVertical: 14, borderRadius: 12, alignItems: 'center' },
+  buttonText: { color: '#020617', fontSize: 13, fontWeight: '900' },
+  resultCard: { backgroundColor: 'rgba(56, 189, 248, 0.05)', padding: 15, borderRadius: 16, marginBottom: 20, borderWidth: 1, borderColor: 'rgba(56, 189, 248, 0.1)' },
+  resultText: { color: '#38BDF8', fontSize: 13, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  advancedToggle: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  toggleArrow: { color: '#475569', fontSize: 10 },
+  advancedContent: { marginTop: 20 },
+  advancedButton: { backgroundColor: '#020617', padding: 16, borderRadius: 14, marginTop: 10, borderWidth: 1, borderColor: '#38BDF8' },
+  advancedButtonText: { color: '#38BDF8', fontSize: 12, fontWeight: '800', textAlign: 'center' },
+  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 },
+  refreshText: { color: '#38BDF8', fontSize: 12, fontWeight: '700' },
+  keyList: { marginTop: 5 },
+  keyItem: { paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#1E293B' },
+  keyText: { color: '#94A3B8', fontSize: 12, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  emptyText: { color: '#475569', fontSize: 12, fontStyle: 'italic', textAlign: 'center', marginVertical: 10 },
+  moreKeysText: { color: '#475569', fontSize: 10, textAlign: 'center', marginTop: 10, fontWeight: '700' },
+  benchmarkCard: { backgroundColor: '#0F172A', borderRadius: 24, padding: 20 },
   benchmarkHeader: { marginBottom: 20 },
-  benchmarkSubtitle: { color: '#64748B', fontSize: 12, marginTop: 4 },
-  benchmarkButton: {
-    backgroundColor: '#38BDF8',
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  benchmarkButtonRow: { flexDirection: 'row', gap: 12, marginBottom: 20 },
-  splitButton: { flex: 1, marginBottom: 0 },
-  resultSection: { marginBottom: 16 },
-  resultSectionTitle: {
-    color: '#94A3B8',
-    fontSize: 14,
-    fontWeight: '600',
-    marginBottom: 8,
-  },
-  benchmarkButtonDisabled: { opacity: 0.6 },
-  benchmarkButtonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
-  runningContainer: { flexDirection: 'row', alignItems: 'center' },
-  winnerBanner: {
-    backgroundColor: 'rgba(34, 197, 94, 0.1)',
-    padding: 12,
-    borderRadius: 10,
-    marginBottom: 16,
-  },
-  winnerText: {
-    color: '#22C55E',
-    fontSize: 14,
-    fontWeight: 'bold',
-    textAlign: 'center',
-  },
-
-  resultTable: { borderRadius: 12, overflow: 'hidden' },
-  resultHeader: {
-    flexDirection: 'row',
-    backgroundColor: '#1E293B',
-    paddingVertical: 10,
-    paddingHorizontal: 8,
-  },
-  resultHeaderCell: {
-    color: '#94A3B8',
-    fontSize: 11,
-    fontWeight: 'bold',
-    textAlign: 'center',
-  },
-  resultRow: {
-    flexDirection: 'row',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1E293B',
-  },
-  resultLabel: { flex: 1, color: '#94A3B8', fontSize: 13 },
-  resultValues: { flex: 3, flexDirection: 'row' },
-  resultValue: {
-    flex: 1,
-    fontSize: 12,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
+  benchmarkSubtitle: { color: '#64748B', fontSize: 11, marginTop: 4, fontWeight: '600' },
+  benchmarkButtonRow: { flexDirection: 'row', gap: 10, marginBottom: 20 },
+  benchmarkButton: { backgroundColor: '#38BDF8', paddingVertical: 15, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  splitButton: { flex: 1 },
+  benchmarkButtonDisabled: { opacity: 0.5 },
+  benchmarkButtonText: { color: '#fff', fontSize: 13, fontWeight: '900' },
+  resultTable: { borderRadius: 16, overflow: 'hidden', backgroundColor: '#020617', padding: 10 },
+  resultHeader: { flexDirection: 'row', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#1E293B' },
+  resultHeaderCell: { flex: 1, color: '#F8FAFC', fontSize: 10, fontWeight: '900', textAlign: 'center' },
+  resultRow: { flexDirection: 'row', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#0F172A' },
+  resultLabel: { flex: 1, color: '#64748B', fontSize: 11, fontWeight: '700' },
+  resultValue: { flex: 1, fontSize: 11, fontWeight: '800', textAlign: 'center' },
   secureDBColor: { color: '#38BDF8' },
   mmkvColor: { color: '#F472B6' },
+  winnerBanner: { backgroundColor: 'rgba(34, 197, 94, 0.1)', padding: 12, borderRadius: 12, marginTop: 20 },
+  winnerText: { color: '#22C55E', fontSize: 12, fontWeight: '900', textAlign: 'center' },
 });
