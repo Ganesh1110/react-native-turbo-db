@@ -2,6 +2,9 @@
 #include <deque>
 #include <string>
 #include <mutex>
+#include <thread>
+#include <condition_variable>
+#include <atomic>
 #include "PersistentBPlusTree.h"
 
 namespace secure_db {
@@ -15,11 +18,12 @@ struct InsertOperation {
 // Prevents node-split rebalancing latency from stalling the UI thread.
 class BufferedBTree {
 public:
-    static constexpr size_t BATCH_SIZE = 64;
+    static constexpr size_t BATCH_SIZE = 1024;
 
     BufferedBTree(PersistentBPlusTree* tree);
+    ~BufferedBTree();
     
-    // Pushes into the deque, flushing only if capacity triggers
+    // Pushes into the deque, triggers background flush if BATCH_SIZE exceeded
     void insert(const std::string& key, size_t data_offset);
     
     // Checks memory buffer first, then cascades to disk
@@ -35,9 +39,17 @@ public:
     std::vector<std::pair<std::string, size_t>> range(const std::string& start_key, const std::string& end_key);
 
 private:
+    void worker_thread();
+
     PersistentBPlusTree* tree_;
     std::deque<InsertOperation> write_buffer_;
     std::mutex buffer_mutex_;
+    
+    // Worker state
+    std::thread worker_;
+    std::condition_variable cv_;
+    std::atomic<bool> stop_worker_{false};
+    std::atomic<bool> flush_requested_{false};
 };
 
 }

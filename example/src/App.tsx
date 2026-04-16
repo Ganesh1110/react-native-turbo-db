@@ -18,8 +18,8 @@ const BenchmarkPage = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [currentTest, setCurrentTest] = useState('');
 
-  const NUM_OPERATIONS = 500;
-  const NUM_QUERIES = 100;
+  const NUM_OPERATIONS = 1000;
+  const NUM_QUERIES = 2000;
 
   const runBenchmark = async () => {
     setIsRunning(true);
@@ -55,8 +55,7 @@ const BenchmarkPage = () => {
   const benchmarkSecureDB = async (db: SecureDB): Promise<number[]> => {
     const times: number[] = [];
 
-    // Bulk Insert (Optimized with setMulti)
-    const insertStart = Date.now();
+    // Preparation (OUTSIDE timer)
     const entries: Record<string, any> = {};
     for (let i = 0; i < NUM_OPERATIONS; i++) {
       entries[`secure_key_${i}`] = {
@@ -65,6 +64,9 @@ const BenchmarkPage = () => {
         value: Math.random(),
       };
     }
+
+    // Bulk Insert (Optimized with setMulti)
+    const insertStart = Date.now();
     db.setMulti(entries);
     const insertEnd = Date.now();
     times.push(insertEnd - insertStart);
@@ -98,13 +100,19 @@ const BenchmarkPage = () => {
   ): Promise<number[]> => {
     const times: number[] = [];
 
+    // Preparation (OUTSIDE timer to match SecureDB)
+    const data: Array<{key: string, val: string}> = [];
+    for (let i = 0; i < NUM_OPERATIONS; i++) {
+      data.push({
+        key: `mmkv_key_${i}`,
+        val: JSON.stringify({ id: i, name: `Item ${i}`, value: Math.random() })
+      });
+    }
+
     // Bulk Insert (MMKV doesn't have setMulti for objects, so we loop)
     const insertStart = Date.now();
     for (let i = 0; i < NUM_OPERATIONS; i++) {
-      mmkv.set(
-        `mmkv_key_${i}`,
-        JSON.stringify({ id: i, name: `Item ${i}`, value: Math.random() })
-      );
+      mmkv.set(data[i].key, data[i].val);
     }
     const insertEnd = Date.now();
     times.push(insertEnd - insertStart);

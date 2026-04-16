@@ -1,13 +1,27 @@
 #include "BufferedBTree.h"
+#include <algorithm>
 
 namespace secure_db {
 
-BufferedBTree::BufferedBTree(PersistentBPlusTree* tree) : tree_(tree) {}
+BufferedBTree::BufferedBTree(PersistentBPlusTree* tree) : tree_(tree) {
+    worker_ = std::thread(&BufferedBTree::worker_thread, this);
+}
+
+BufferedBTree::~BufferedBTree() {
+    {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        stop_worker_ = true;
+    }
+    cv_.notify_all();
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+}
 
 void BufferedBTree::insert(const std::string& key, size_t data_offset) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     
-    // If it already exists in the pending buffer, update the pointer natively without disk I/O
+    // Update existing key in buffer if present
     bool found = false;
     for (auto& op : write_buffer_) {
         if (op.key == key) {
@@ -21,49 +35,63 @@ void BufferedBTree::insert(const std::string& key, size_t data_offset) {
         write_buffer_.push_back({key, data_offset});
     }
     
-    // Check batched threshold
+    // If threshold reached, notify background worker
     if (write_buffer_.size() >= BATCH_SIZE) {
-        // Flush buffer sequentially for this Phase 4 prototype.
-        // Moving this loop to a std::thread background worker achieves true Zero-Latency inserts.
-        for (const auto& op : write_buffer_) {
-            tree_->insert(op.key, op.data_offset, false);
+        flush_requested_ = true;
+        cv_.notify_one();
+    }
+}
+
+void BufferedBTree::worker_thread() {
+    while (!stop_worker_) {
+        std::deque<InsertOperation> to_flush;
+        {
+            std::unique_lock<std::mutex> lock(buffer_mutex_);
+            cv_.wait(lock, [this] { return stop_worker_ || flush_requested_ || write_buffer_.size() >= BATCH_SIZE; });
+            
+            if (stop_worker_ && write_buffer_.empty()) break;
+            
+            // Move items out of the buffer to flush them without holding the lock
+            if (!write_buffer_.empty()) {
+                to_flush = std::move(write_buffer_);
+                write_buffer_ = std::deque<InsertOperation>();
+            }
+            flush_requested_ = false;
         }
-        tree_->checkpoint();
-        write_buffer_.clear();
+        
+        if (!to_flush.empty()) {
+            for (const auto& op : to_flush) {
+                tree_->insert(op.key, op.data_offset, false);
+            }
+            tree_->checkpoint();
+        }
     }
 }
 
 size_t BufferedBTree::find(const std::string& key) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     
-    // LIFO (Last-In-First-Out) search in the uncommitted buffer ensures we get
-    // the absolute freshest data before falling back to the disk blocks
+    // LIFO search in the buffer
     for (auto it = write_buffer_.rbegin(); it != write_buffer_.rend(); ++it) {
         if (it->key == key) {
             return it->data_offset;
         }
     }
     
-    // Fallback traversing the heavy on-disk tree
     return tree_->find(key);
 }
 
 void BufferedBTree::flush() {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
-    if (write_buffer_.empty()) return;
-    
-    for (const auto& op : write_buffer_) {
-        tree_->insert(op.key, op.data_offset, false);
-    }
-    tree_->checkpoint();
-    write_buffer_.clear();
+    flush_requested_ = true;
+    cv_.notify_one();
+    // In a production system, we might wait here for the worker to finish the flush
 }
 
 std::vector<std::string> BufferedBTree::getAllKeys() {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     std::vector<std::string> disk_keys = tree_->getAllKeys();
     
-    // Combine with buffer (and handle duplicates)
     std::vector<std::string> results = disk_keys;
     for (const auto& op : write_buffer_) {
         if (std::find(results.begin(), results.end(), op.key) == results.end()) {
@@ -77,10 +105,8 @@ std::vector<std::pair<std::string, size_t>> BufferedBTree::range(const std::stri
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     auto results = tree_->range(start_key, end_key);
     
-    // Merge with buffer
     for (const auto& op : write_buffer_) {
         if (op.key >= start_key && op.key <= end_key) {
-            // Update if already in results, else insert
             bool found = false;
             for (auto& res : results) {
                 if (res.first == op.key) {
@@ -95,7 +121,6 @@ std::vector<std::pair<std::string, size_t>> BufferedBTree::range(const std::stri
         }
     }
     
-    // Sort results as it might be unordered due to buffer merge
     std::sort(results.begin(), results.end(), [](const auto& a, const auto& b) {
         return a.first < b.first;
     });

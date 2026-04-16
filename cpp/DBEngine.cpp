@@ -474,7 +474,7 @@ void installDBEngine(facebook::jsi::Runtime& runtime, std::unique_ptr<SecureCryp
 }
 
 facebook::jsi::Value DBEngine::setMulti(facebook::jsi::Runtime& runtime, const facebook::jsi::Value& entries) {
-    if (!entries.isObject()) {
+    if (!entries.isObject() || !btree_ || !mmap_) {
         return facebook::jsi::Value(false);
     }
     
@@ -482,17 +482,62 @@ facebook::jsi::Value DBEngine::setMulti(facebook::jsi::Runtime& runtime, const f
     auto propNames = obj.getPropertyNames(runtime);
     size_t count = propNames.size(runtime);
     
-    for (size_t i = 0; i < count; i++) {
-        auto key = propNames.getValueAtIndex(runtime, i).asString(runtime);
-        auto value = obj.getProperty(runtime, key);
-        insertRecInternal(runtime, key.utf8(runtime), value, false);
-    }
+    // Phase 4 Ultra-Optimization: 
+    // We avoid 500 individual try/catch and JSI overhead of calling insertRecInternal.
+    // We also batch all WAL records into a single buffered write if possible.
     
-    if (wal_) {
-        wal_->logCommit();
+    try {
+        for (size_t i = 0; i < count; i++) {
+            auto propName = propNames.getValueAtIndex(runtime, i).asString(runtime);
+            std::string key = propName.utf8(runtime);
+            auto value = obj.getProperty(runtime, propName);
+
+            // Serialization
+            arena_.reset();
+            BinarySerializer::serialize(runtime, value, arena_);
+            
+            size_t offset = next_free_offset_;
+            size_t serialized_size = arena_.size();
+            
+            size_t payload_len = serialized_size;
+            const uint8_t* payload_ptr = arena_.data();
+            std::vector<uint8_t> encrypted;
+
+            if (crypto_) {
+                encrypted = crypto_->encrypt(arena_.data(), serialized_size);
+                payload_ptr = encrypted.data();
+                payload_len = encrypted.size();
+            }
+            
+            uint32_t len32 = static_cast<uint32_t>(payload_len);
+            
+            // Log to WAL (batched internally by std::ofstream)
+            if (wal_) {
+                wal_->logPageWrite(offset, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
+                wal_->logPageWrite(offset + sizeof(uint32_t), payload_ptr, payload_len);
+            }
+            
+            // Direct MMap Write (Memory-only, OS handles flushing)
+            mmap_->write(offset, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
+            mmap_->write(offset + sizeof(uint32_t), payload_ptr, payload_len);
+            
+            next_free_offset_ += sizeof(uint32_t) + payload_len;
+            
+            // Buffered B-Tree insert (Background worker handles the rest)
+            btree_->insert(key, offset);
+        }
+        
+        if (wal_) {
+            wal_->logCommit(); // Single flush for the entire batch
+        }
+        
+        pbtree_->setNextFreeOffset(next_free_offset_);
+        
+        return facebook::jsi::Value(true);
+    } catch (const std::exception& e) {
+        LOGE("setMulti error: %s", e.what());
+        return facebook::jsi::Value(false);
     }
-    
-    return facebook::jsi::Value(true);
 }
 
 facebook::jsi::Value DBEngine::getMultiple(facebook::jsi::Runtime& runtime, const facebook::jsi::Value& keys) {
