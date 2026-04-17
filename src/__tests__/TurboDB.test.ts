@@ -24,6 +24,13 @@ const storage = new Map<string, any>();
   findRec: jest.fn((key: string) => {
     return storage.get(key);
   }),
+  remove: jest.fn((key: string) => {
+    if (storage.has(key)) {
+      storage.delete(key);
+      return true;
+    }
+    return false;
+  }),
   del: jest.fn((key: string) => {
     if (storage.has(key)) {
       storage.delete(key);
