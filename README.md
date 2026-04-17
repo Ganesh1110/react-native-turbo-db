@@ -26,7 +26,7 @@ Most React Native storage solutions rely on the asynchronous bridge (AsyncStorag
 
 - **Zero Serialization**: No more JSON.stringify overhead on every write.
 - **Instant Reads**: Access data synchronously in your render functions without "Flash of Missing Content".
-- **Military Grade**: Data is encrypted using [Libsodium](https://libsodium.gitbook.io/doc/) before it ever touches the disk.
+- **Military Grade**: Data is encrypted using **XChaCha20-Poly1305 AEAD** (Libsodium) before it ever touches the disk.
 - **SEO & SSR Optimized**: Built-in isomorphic support with a robust `IndexedDB` backend for web, enabling synchronous hydration and zero-CLS (Cumulative Layout Shift).
 
 ## 🚀 Features
