@@ -22,7 +22,7 @@ Pod::Spec.new do |s|
   # error on Xcode 26 Beta where the SDK does not ship that header yet.
   s.pod_target_xcconfig = {
     "OTHER_CPLUSPLUSFLAGS" => "-DFOLLY_NO_CONFIG -DFOLLY_MOBILE=1 -DFOLLY_USE_LIBCPP=1 -DFOLLY_HAS_COROUTINES=0 -DSODIUM_STATIC=1",
-    "HEADER_SEARCH_PATHS" => "\"$(PODS_TARGET_SRCROOT)/cpp\" \"$(PODS_ROOT)/libsodium/src/libsodium/include/sodium\""
+    "HEADER_SEARCH_PATHS" => "\"$(PODS_TARGET_SRCROOT)/cpp\" \"$(PODS_TARGET_SRCROOT)/ios/generated\" \"$(PODS_ROOT)/libsodium/src/libsodium/include/sodium\""
   }
 
   install_modules_dependencies(s)
