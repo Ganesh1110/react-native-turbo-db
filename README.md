@@ -1,11 +1,24 @@
 # react-native-turbo-db
 
 [![NPM Version](https://img.shields.io/npm/v/react-native-turbo-db.svg?style=flat-square)](https://www.npmjs.com/package/react-native-turbo-db)
-[![License](https://img.shields.io/npm/l/react-native-turbo-db.svg?style=flat-square)](https://www.npmjs.com/package/react-native-turbo-db)
-[![Platform](https://img.shields.io/badge/platform-android%20%7C%20ios-blue.svg?style=flat-square)](https://www.npmjs.com/package/react-native-turbo-db)
+[![License](https://img.shields.io/npm/l/react-native-turbo-db.svg?style=flat-square)](https://npmjs.org/package/react-native-turbo-db)
+[![Platform](https://img.shields.io/badge/platform-android%20%7C%20ios%20%7C%20web-blue.svg?style=flat-square)](https://npmjs.org/package/react-native-turbo-db)
 [![New Architecture](https://img.shields.io/badge/architecture-TurboModule%20%7C%20JSI-green.svg?style=flat-square)](https://reactnative.dev/docs/the-new-architecture/landing)
+[![Web Support](https://img.shields.io/badge/web-IndexedDB-orange.svg?style=flat-square)](https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API)
 
-A lightning-fast, **JSI-powered**, embedded key-value database for React Native. Built with a high-performance C++ B+ Tree engine and secured with AES-256 encryption, it provides near-native data access speeds by eliminating bridge serialization.
+## 🏗️ Supported Platforms & Frameworks
+
+| Platform                            | Support    | Description                               |
+| :---------------------------------- | :--------- | :---------------------------------------- |
+| **React Native (New Architecture)** | ✅ Full    | TurboModule + JSI for maximum performance |
+| **React Native (Old Architecture)** | ⚠️ Limited | Works but uses fallback bridge            |
+| **React JS / Web**                  | ✅ Full    | Uses IndexedDB backend, SSR-safe          |
+| **Next.js (SSR)**                   | ✅ Full    | Server-side rendering safe                |
+| **Remix**                           | ✅ Full    | Server-side rendering safe                |
+| **Expo**                            | ✅ Full    | Works with `npx expo prebuild`            |
+| **React Native Web**                | ✅ Full    | Uses IndexedDB fallback                   |
+
+> **Note**: TurboDB is designed for React Native's New Architecture (TurboModules). For web/SSR platforms, it automatically falls back to IndexedDB with the same API.
 
 ## 🌟 Why TurboDB?
 
@@ -33,15 +46,28 @@ npm install react-native-turbo-db
 yarn add react-native-turbo-db
 ```
 
+### Requirements
+
+| Requirement               | Version           | Notes                            |
+| :------------------------ | :---------------- | :------------------------------- |
+| **React Native**          | ≥0.76.0           | Recommended for New Architecture |
+| **React Native CLI**      | Latest            | Required for native builds       |
+| **Node.js**               | ≥18.0.0           | For build tooling                |
+| **iOS Deployment Target** | ≥15.1             | Required for TurboModules        |
+| **Android minSdkVersion** | ≥24 (Android 7.0) | For Libsodium crypto support     |
+
 ### iOS
+
 ```sh
 cd ios && pod install
 ```
 
 ### Android
+
 No additional setup required! Ensure you have the New Architecture enabled in your `gradle.properties`.
 
 ### Web (SSR/Next.js/Remix)
+
 TurboDB works out-of-the-box on the web using `IndexedDB`. It is SSR-safe and won't crash during server-side rendering.
 
 ## 🛠 Usage
@@ -85,8 +111,8 @@ const first100Keys = db.getAllKeysPaged(100, 0);
 
 // Multi-Set (Atomic)
 db.setMulti({
-  'token': 'secret_abc',
-  'expires': 3600
+  token: 'secret_abc',
+  expires: 3600,
 });
 
 // Range Query (Great for paginated lists or time-series data)
@@ -107,18 +133,36 @@ async function heavyWork() {
 ## 🔐 Security
 
 TurboDB generates a unique 256-bit master key for every installation.
+
 - **Android**: Stored in encrypted `SharedPreferences`.
 - **iOS**: Stored in `Keychain` with `kSecAttrAccessibleAfterFirstUnlock`.
 - **Encryption**: Records are encrypted using `crypto_aead_xchacha20poly1305_ietf`, providing both confidentiality and authenticity (MAC).
 
 ## 📊 Performance Benchmarks
 
-*Tested on iPhone 15 Pro / Pixel 8. Operations per 1000 items.*
+_Tested on iPhone 15 Pro / Pixel 8. Operations per 1000 items._
 
-| Operation | TurboDB (JSI) | AsyncStorage | SQLite (Bridge) |
-| :--- | :--- | :--- | :--- |
-| **Bulk Write** | **~10ms** | ~180ms | ~60ms |
-| **Random Read** | **~4ms** | ~120ms | ~45ms |
+| Operation       | TurboDB (JSI) | AsyncStorage | SQLite (Bridge) |
+| :-------------- | :------------ | :----------- | :-------------- |
+| **Bulk Write**  | **~10ms**     | ~180ms       | ~60ms           |
+| **Random Read** | **~4ms**      | ~120ms       | ~45ms           |
+
+## 📋 API Reference
+
+| Method                              | Description           | Platform Support |
+| :---------------------------------- | :-------------------- | :--------------- |
+| `db.set(key, value)`                | Synchronous write     | Native, Web      |
+| `db.get(key)`                       | Synchronous read      | Native, Web      |
+| `db.has(key)`                       | Check key existence   | Native, Web      |
+| `db.remove(key)` / `db.del(key)`    | Delete a key          | Native, Web      |
+| `db.setMulti(entries)`              | Bulk atomic write     | Native, Web      |
+| `db.getMultiple(keys)`              | Bulk read             | Native, Web      |
+| `db.getAllKeys()`                   | Get all keys          | Native, Web      |
+| `db.getAllKeysPaged(limit, offset)` | Paginated keys        | Native only      |
+| `db.rangeQuery(startKey, endKey)`   | Range query           | Native only      |
+| `db.clear()` / `db.deleteAll()`     | Clear all data        | Native, Web      |
+| `db.flush()`                        | Force write to disk   | Native only      |
+| `db.benchmark()`                    | Performance benchmark | Native only      |
 
 ## 🤝 Contributing
 
