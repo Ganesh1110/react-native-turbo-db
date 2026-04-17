@@ -12,7 +12,8 @@
 | :---------------------------------- | :--------- | :---------------------------------------- |
 | **React Native (New Architecture)** | ✅ Full    | TurboModule + JSI for maximum performance |
 | **React Native (Old Architecture)** | ⚠️ Limited | Works but uses fallback bridge            |
-| **React JS / Web**                  | ✅ Full    | Uses IndexedDB backend, SSR-safe          |
+| **React JS / Vanilla JS**           | ✅ Full    | Uses IndexedDB backend, SSR-safe          |
+| **Node.js / Deno**                  | ✅ Full    | Uses IndexedDB polyfill or localStorage   |
 | **Next.js (SSR)**                   | ✅ Full    | Server-side rendering safe                |
 | **Remix**                           | ✅ Full    | Server-side rendering safe                |
 | **Expo**                            | ✅ Full    | Works with `npx expo prebuild`            |
@@ -69,6 +70,33 @@ No additional setup required! Ensure you have the New Architecture enabled in yo
 ### Web (SSR/Next.js/Remix)
 
 TurboDB works out-of-the-box on the web using `IndexedDB`. It is SSR-safe and won't crash during server-side rendering.
+
+### Vanilla JavaScript / Node.js
+
+You can also use TurboDB in plain JavaScript projects:
+
+```html
+<script type="module">
+  import { TurboDB } from 'https://esm.sh/react-native-turbo-db';
+
+  const db = new TurboDB('my_data', 10 * 1024 * 1024);
+  db.set('hello', 'world');
+  console.log(db.get('hello')); // "world"
+</script>
+```
+
+For Node.js, install and use:
+
+```bash
+npm install react-native-turbo-db
+```
+
+```javascript
+import { TurboDB } from 'react-native-turbo-db';
+
+const db = new TurboDB('./data.db');
+db.set('key', 'value');
+```
 
 ## 🛠 Usage
 
