@@ -47,6 +47,12 @@
 - [ ] **Regex Search** - Filter keys by pattern
 - [ ] **Full-Text Index** - Search within stored strings
 
+### Structured Data (SQL-like)
+
+- [ ] **SQL Query Layer** - Support SQL-like queries for complex data structures
+- [ ] **Table Schema** - Define structured tables with columns and types
+- [ ] **JOIN Operations** - Support basic relational JOINs
+
 ### Data Management
 
 - [ ] **Import/Export** - JSON backup and restore
@@ -58,6 +64,12 @@
 - [ ] **Change Events** - Subscribe to key changes
 - [ ] **Metrics API** - Query cache hits, disk I/O, etc.
 - [ ] **Debug Mode** - Verbose logging for troubleshooting
+
+### Real-Time Sync
+
+- [ ] **Live Queries** - Reactive queries that auto-update on data changes
+- [ ] **Observable API** - Subscribe to specific keys or query results
+- [ ] **Offline-First** - Queue operations when offline, sync when online
 
 ---
 
@@ -81,7 +93,6 @@
 
 - [ ] ACID transactions across multiple keys
 - [ ] Replication/Cluster support
-- [ ] SQL-like query language
 - [ ] Graph/Relationship data model
 
 ---
