@@ -1721,10 +1721,101 @@ facebook::jsi::Value DBEngine::getLocalChangesAsync(
             std::shared_ptr<facebook::jsi::Function> reject)
         {
             scheduler_->schedule([this, lastSyncClock, resolve, reject] {
-                // Return payload type depends on deserialization at JS layer.
-                // We'll post back raw bytes for now.
-                js_invoker_->invokeAsync([resolve, reject] {
-                    (void)resolve; (void)reject;
+                struct ChangeItem {
+                    std::string key;
+                    std::vector<uint8_t> raw_payload;
+                    SyncMetadata meta;
+                };
+                std::vector<ChangeItem> changes;
+                uint64_t latest_clock = lastSyncClock;
+
+                try {
+                    std::shared_lock lock(rw_mutex_);
+                    if (!sync_enabled_ || !oplog_pbtree_) {
+                        throw std::runtime_error("Sync not enabled for this database");
+                    }
+
+                    // Scan from clock + 1 to max
+                    char start_buf[32];
+                    snprintf(start_buf, sizeof(start_buf), "%020llu_", (unsigned long long)lastSyncClock + 1);
+                    auto oplog_entries = oplog_pbtree_->range(start_buf, "99999999999999999999_");
+
+                    for (auto& entry : oplog_entries) {
+                        // entry.first is "clock_entityKey", we need the entityKey
+                        size_t underscore_pos = entry.first.find('_');
+                        if (underscore_pos == std::string::npos) continue;
+                        
+                        std::string entityKey = entry.first.substr(underscore_pos + 1);
+                        uint64_t clock = std::stoull(entry.first.substr(0, underscore_pos));
+                        if (clock > latest_clock) latest_clock = clock;
+
+                        // Fetch actual record
+                        size_t offset = btree_->find(entityKey);
+                        if (offset == 0) continue;
+
+                        const uint8_t* len_ptr = mmap_->get_address(offset);
+                        if (!len_ptr) continue;
+
+                        uint32_t total_len;
+                        std::memcpy(&total_len, len_ptr, sizeof(uint32_t));
+
+                        const uint8_t* raw_ptr = mmap_->get_address(offset + sizeof(uint32_t));
+                        if (!raw_ptr || total_len < sizeof(SyncMetadata)) continue;
+
+                        SyncMetadata meta;
+                        std::memcpy(&meta, raw_ptr, sizeof(SyncMetadata));
+
+                        // Only return if it's actually dirty (unless we want to return all history)
+                        if (!(meta.flags & SYNC_FLAG_DIRTY)) continue;
+
+                        std::vector<uint8_t> payload(raw_ptr + sizeof(SyncMetadata), 
+                                                    raw_ptr + total_len);
+                        
+                        // Decrypt if needed
+                        if (crypto_) {
+                            payload = crypto_->decryptAtOffset(payload.data(), payload.size(), 
+                                                              offset + sizeof(uint32_t) + sizeof(SyncMetadata));
+                        }
+
+                        changes.push_back({entityKey, std::move(payload), meta});
+                    }
+                } catch (const std::exception& e) {
+                    js_invoker_->invokeAsync([reject, msg = std::string(e.what())] {
+                        reject->call(*reject, msg.c_str());
+                    });
+                    return;
+                }
+
+                js_invoker_->invokeAsync([this, resolve, changes = std::move(changes), latest_clock] {
+                    // We need a runtime here to build the result. 
+                    // createPromise's internal resolution logic will provide it.
+                    // Actually, we capture resolve/reject which are functions bound to a runtime.
+                    
+                    // Note: This pattern assumes the runtime is still alive.
+                    // In a production app, resolve/reject being functions keeps the runtime alive.
+                    facebook::jsi::Runtime& rt = resolve->getRuntime();
+                    
+                    facebook::jsi::Object res(rt);
+                    res.setProperty(rt, "latest_clock", (double)latest_clock);
+                    
+                    facebook::jsi::Array jsi_changes(rt, changes.size());
+                    for (size_t i = 0; i < changes.size(); ++i) {
+                        facebook::jsi::Object item(rt);
+                        item.setProperty(rt, "key", changes[i].key);
+                        
+                        auto des = BinarySerializer::deserialize(rt, changes[i].raw_payload.data(), changes[i].raw_payload.size());
+                        item.setProperty(rt, "data", std::move(des.first));
+                        
+                        item.setProperty(rt, "logical_clock", (double)changes[i].meta.logical_clock);
+                        item.setProperty(rt, "remote_version", (double)changes[i].meta.remote_version);
+                        item.setProperty(rt, "updated_at", (double)changes[i].meta.updated_at);
+                        item.setProperty(rt, "is_deleted", (bool)(changes[i].meta.flags & SYNC_FLAG_TOMBSTONE));
+                        
+                        jsi_changes.setValueAtIndex(rt, i, item);
+                    }
+                    res.setProperty(rt, "changes", std::move(jsi_changes));
+                    
+                    resolve->call(*resolve, res);
                 });
             }, DBScheduler::Priority::READ);
         });
@@ -1734,15 +1825,90 @@ facebook::jsi::Value DBEngine::applyRemoteChangesAsync(
     facebook::jsi::Runtime& runtime,
     const facebook::jsi::Value& args)
 {
+    if (!args.isArray()) {
+        throw facebook::jsi::JSError(runtime, "applyRemoteChangesAsync requires an array of changes");
+    }
+
+    struct RemoteChange {
+        std::string key;
+        std::vector<uint8_t> serialized_data;
+        uint64_t remote_version;
+        uint64_t updated_at;
+        bool is_deleted;
+    };
+
+    std::vector<RemoteChange> changes;
+    facebook::jsi::Array jsi_arr = args.asObject(runtime).asArray(runtime);
+    size_t len = jsi_arr.size(runtime);
+    changes.reserve(len);
+
+    for (size_t i = 0; i < len; ++i) {
+        facebook::jsi::Object obj = jsi_arr.getValueAtIndex(runtime, i).asObject(runtime);
+        RemoteChange rc;
+        rc.key = obj.getProperty(runtime, "key").asString(runtime).utf8(runtime);
+        rc.remote_version = static_cast<uint64_t>(obj.getProperty(runtime, "remote_version").asNumber());
+        rc.updated_at = static_cast<uint64_t>(obj.getProperty(runtime, "updated_at").asNumber());
+        rc.is_deleted = obj.getProperty(runtime, "is_deleted").asBool();
+
+        // Serialize the data now on JS thread
+        facebook::jsi::Value data = obj.getProperty(runtime, "data");
+        ArenaAllocator temp_arena(4096);
+        BinarySerializer::serialize(runtime, data, temp_arena);
+        rc.serialized_data.assign(temp_arena.data(), temp_arena.data() + temp_arena.size());
+
+        changes.push_back(std::move(rc));
+    }
+
     return createPromise(runtime,
-        [this](
+        [this, changes = std::move(changes)](
             std::shared_ptr<facebook::jsi::Function> resolve,
             std::shared_ptr<facebook::jsi::Function> reject)
         {
-            scheduler_->schedule([this, resolve, reject] {
-                js_invoker_->invokeAsync([resolve, reject] {
-                    (void)resolve; (void)reject;
-                });
+            scheduler_->schedule([this, changes, resolve, reject] {
+                try {
+                    for (const auto& rc : changes) {
+                        std::shared_lock read_lock(rw_mutex_);
+                        size_t offset = btree_->find(rc.key);
+                        
+                        bool should_apply = true;
+                        if (offset != 0) {
+                            const uint8_t* raw_ptr = mmap_->get_address(offset + sizeof(uint32_t));
+                            if (raw_ptr) {
+                                SyncMetadata local_meta;
+                                std::memcpy(&local_meta, raw_ptr, sizeof(SyncMetadata));
+                                
+                                // Conflict resolution: LWW
+                                if (rc.remote_version < local_meta.remote_version) {
+                                    should_apply = false;
+                                } else if (rc.remote_version == local_meta.remote_version) {
+                                    if (rc.updated_at < local_meta.updated_at) {
+                                        should_apply = false;
+                                    }
+                                }
+                            }
+                        }
+                        read_lock.unlock();
+
+                        if (should_apply) {
+                            SyncMetadata meta;
+                            std::memset(&meta, 0, sizeof(SyncMetadata));
+                            meta.logical_clock = nextLogicalClock();
+                            meta.updated_at = rc.updated_at;
+                            meta.remote_version = rc.remote_version;
+                            meta.flags = (rc.is_deleted ? SYNC_FLAG_TOMBSTONE : 0); // NOT dirty, it came from remote
+
+                            insertRecBytes(rc.key, rc.serialized_data, true, rc.is_deleted, &meta);
+                        }
+                    }
+
+                    js_invoker_->invokeAsync([resolve] {
+                        resolve->call(*resolve, true);
+                    });
+                } catch (const std::exception& e) {
+                    js_invoker_->invokeAsync([reject, msg = std::string(e.what())] {
+                        reject->call(*reject, msg.c_str());
+                    });
+                }
             }, DBScheduler::Priority::WRITE);
         });
 }
@@ -1751,15 +1917,63 @@ facebook::jsi::Value DBEngine::markPushedAsync(
     facebook::jsi::Runtime& runtime,
     const facebook::jsi::Value& args)
 {
+    if (!args.isArray()) {
+        throw facebook::jsi::JSError(runtime, "markPushedAsync requires an array of ACKs");
+    }
+
+    struct Ack {
+        std::string key;
+        uint64_t remote_version;
+    };
+
+    std::vector<Ack> acks;
+    facebook::jsi::Array jsi_arr = args.asObject(runtime).asArray(runtime);
+    size_t len = jsi_arr.size(runtime);
+    acks.reserve(len);
+
+    for (size_t i = 0; i < len; ++i) {
+        facebook::jsi::Object obj = jsi_arr.getValueAtIndex(runtime, i).asObject(runtime);
+        Ack ack;
+        ack.key = obj.getProperty(runtime, "key").asString(runtime).utf8(runtime);
+        ack.remote_version = static_cast<uint64_t>(obj.getProperty(runtime, "remote_version").asNumber());
+        acks.push_back(std::move(ack));
+    }
+
     return createPromise(runtime,
-        [this](
+        [this, acks = std::move(acks)](
             std::shared_ptr<facebook::jsi::Function> resolve,
             std::shared_ptr<facebook::jsi::Function> reject)
         {
-            scheduler_->schedule([this, resolve, reject] {
-                js_invoker_->invokeAsync([resolve, reject] {
-                    (void)resolve; (void)reject;
-                });
+            scheduler_->schedule([this, acks, resolve, reject] {
+                try {
+                    std::unique_lock lock(rw_mutex_);
+                    for (const auto& ack : acks) {
+                        size_t offset = btree_->find(ack.key);
+                        if (offset == 0) continue;
+
+                        const uint8_t* raw_ptr = mmap_->get_address(offset + sizeof(uint32_t));
+                        if (!raw_ptr) continue;
+
+                        SyncMetadata meta;
+                        std::memcpy(&meta, raw_ptr, sizeof(SyncMetadata));
+
+                        // Only clear dirty if it hasn't been changed again since we pushed
+                        // In this basic version, we just clear it.
+                        meta.flags &= ~SYNC_FLAG_DIRTY;
+                        meta.remote_version = ack.remote_version;
+
+                        // Write back in place since SyncMetadata size is fixed
+                        mmap_->write(offset + sizeof(uint32_t), reinterpret_cast<uint8_t*>(&meta), sizeof(SyncMetadata));
+                    }
+
+                    js_invoker_->invokeAsync([resolve] {
+                        resolve->call(*resolve, true);
+                    });
+                } catch (const std::exception& e) {
+                    js_invoker_->invokeAsync([reject, msg = std::string(e.what())] {
+                        reject->call(*reject, msg.c_str());
+                    });
+                }
             }, DBScheduler::Priority::WRITE);
         });
 }

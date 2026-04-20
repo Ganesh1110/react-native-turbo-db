@@ -1,5 +1,6 @@
 import { TurboModuleRegistry, NativeModules } from 'react-native';
 import type { Spec } from './NativeTurboDB';
+import type { SyncChanges, SyncRecord, SyncAck } from './SyncManager';
 
 const NativeTurboDB =
   TurboModuleRegistry.get<Spec>('TurboDB') || (NativeModules as any).TurboDB;
@@ -7,7 +8,7 @@ const NativeTurboDB =
 declare const global: {
   NativeDB: {
     // ── Sync API ──
-    initStorage(path: string, size: number): boolean;
+    initStorage(path: string, size: number, syncEnabled: boolean): boolean;
     insertRec(key: string, obj: any): boolean;
     findRec(key: string): any;
     clearStorage(): boolean;
@@ -17,7 +18,10 @@ declare const global: {
     del(key: string): boolean;
     deleteAll(): boolean;
     benchmark(): number;
-    rangeQuery(startKey: string, endKey: string): Array<{ key: string; value: any }>;
+    rangeQuery(
+      startKey: string,
+      endKey: string
+    ): Array<{ key: string; value: any }>;
     getAllKeys(): string[];
     getAllKeysPaged(limit: number, offset: number): string[];
     flush(): void;
@@ -56,7 +60,14 @@ declare const global: {
 export type DBMode = 'secure' | 'turbo';
 
 export { SyncManager } from './SyncManager';
-export type { SyncAdapter, SyncRecord, SyncChanges, SyncAck, SyncOptions, SyncEvent } from './SyncManager';
+export type {
+  SyncAdapter,
+  SyncRecord,
+  SyncChanges,
+  SyncAck,
+  SyncOptions,
+  SyncEvent,
+} from './SyncManager';
 
 export interface RangeQueryResult {
   key: string;
@@ -86,9 +97,10 @@ export class TurboDB {
    */
   static async create(
     path: string,
-    size: number = 10 * 1024 * 1024
+    size: number = 10 * 1024 * 1024,
+    options: { syncEnabled?: boolean } = {}
   ): Promise<TurboDB> {
-    const db = new TurboDB(path, size);
+    const db = new TurboDB(path, size, options);
     await db._initAsync();
     return db;
   }
@@ -122,7 +134,8 @@ export class TurboDB {
    */
   constructor(
     private path: string,
-    private size: number = 10 * 1024 * 1024
+    private size: number = 10 * 1024 * 1024,
+    private options: { syncEnabled?: boolean } = {}
   ) {}
 
   /**
@@ -133,7 +146,9 @@ export class TurboDB {
     if (this.isInitialized) return;
 
     if (!NativeTurboDB) {
-      throw new Error('[TurboDB] Native module not found. Check your native build.');
+      throw new Error(
+        '[TurboDB] Native module not found. Check your native build.'
+      );
     }
 
     TurboDB.install();
@@ -145,7 +160,11 @@ export class TurboDB {
       );
     }
 
-    const success = global.NativeDB.initStorage(this.path, this.size);
+    const success = global.NativeDB.initStorage(
+      this.path,
+      this.size,
+      this.options.syncEnabled ?? false
+    );
     if (!success) {
       throw new Error(`[TurboDB] Failed to initialize storage at ${this.path}`);
     }
@@ -160,7 +179,9 @@ export class TurboDB {
     if (this.isInitialized) return;
 
     if (!NativeTurboDB) {
-      throw new Error('[TurboDB] Native module not found. Check your native build.');
+      throw new Error(
+        '[TurboDB] Native module not found. Check your native build.'
+      );
     }
 
     TurboDB.install();
@@ -172,7 +193,11 @@ export class TurboDB {
       );
     }
 
-    const success = global.NativeDB.initStorage(this.path, this.size);
+    const success = global.NativeDB.initStorage(
+      this.path,
+      this.size,
+      this.options.syncEnabled ?? false
+    );
     if (!success) {
       throw new Error(`[TurboDB] Failed to initialize storage at ${this.path}`);
     }
@@ -314,6 +339,32 @@ export class TurboDB {
   async removeAsync(key: string): Promise<boolean> {
     this.ensureInitialized();
     return global.NativeDB.removeAsync(key);
+  }
+
+  // ── Sync API (used by SyncManager) ────────────────────────────────────────
+
+  /**
+   * Returns all locally modified records since lastSyncClock.
+   */
+  async getLocalChangesAsync(lastSyncClock: number): Promise<SyncChanges> {
+    this.ensureInitialized();
+    return global.NativeDB.getLocalChangesAsync(lastSyncClock);
+  }
+
+  /**
+   * Atomically apply remote changes with conflict resolution.
+   */
+  async applyRemoteChangesAsync(changes: SyncRecord[]): Promise<boolean> {
+    this.ensureInitialized();
+    return global.NativeDB.applyRemoteChangesAsync(changes);
+  }
+
+  /**
+   * Mark local records as successfully pushed to clear dirty flags.
+   */
+  async markPushedAsync(acks: SyncAck[]): Promise<boolean> {
+    this.ensureInitialized();
+    return global.NativeDB.markPushedAsync(acks);
   }
 
   // ── Diagnostics ───────────────────────────────────────────────────────────

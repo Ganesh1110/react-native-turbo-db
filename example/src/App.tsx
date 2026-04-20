@@ -14,6 +14,7 @@ import {
   UIManager,
 } from 'react-native';
 import { TurboDB } from 'rn-turbo-db';
+import { SyncPage } from './SyncPage';
 
 if (
   Platform.OS === 'android' &&
@@ -155,7 +156,9 @@ const BenchmarkPage = () => {
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'demo' | 'benchmark'>('demo');
+  const [activeTab, setActiveTab] = useState<'demo' | 'benchmark' | 'sync'>(
+    'demo'
+  );
   const [key, setKey] = useState('');
   const [value, setValue] = useState('');
   const [dbPath, setDbPath] = useState('');
@@ -186,7 +189,7 @@ export default function App() {
     const docPath = TurboDB.getDocumentsDirectory();
     setDbPath(docPath);
     const dbFile = `${docPath}/secure_v1.db`;
-    setDb(new TurboDB(dbFile, 10 * 1024 * 1024));
+    setDb(new TurboDB(dbFile, 10 * 1024 * 1024, { syncEnabled: true }));
   }, []);
 
   useEffect(() => {
@@ -317,7 +320,7 @@ export default function App() {
         </View>
 
         <View style={styles.tabContainer}>
-          {['demo', 'benchmark'].map((tab) => (
+          {['demo', 'benchmark', 'sync'].map((tab) => (
             <TouchableOpacity
               key={tab}
               style={[styles.tab, activeTab === tab && styles.activeTab]}
@@ -552,8 +555,10 @@ export default function App() {
               </View>
             </View>
           </>
-        ) : (
+        ) : activeTab === 'benchmark' ? (
           <BenchmarkPage />
+        ) : (
+          db && <SyncPage db={db} />
         )}
       </ScrollView>
     </SafeAreaView>

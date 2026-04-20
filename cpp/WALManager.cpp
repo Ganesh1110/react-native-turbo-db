@@ -120,8 +120,9 @@ bool WALManager::sync() {
     // iOS/macOS: open separately for fsync (std::ofstream doesn't expose fd)
     int fd = ::open(wal_path_.c_str(), O_RDONLY);
     if (fd >= 0) {
-        ::fdatasync(fd);
-        ::close(fd);
+        ::fsync(fd);
+        ::close(fd);̊
+      
     }
 #endif
     return true;

@@ -95,48 +95,15 @@ target 'TurboDBExample' do
         end
       end
     end
-    # Fix libsodium header collision by renaming utils.h to sodium_utils.h
     libsodium_path = "Pods/libsodium/src/libsodium"
     if Dir.exist?(libsodium_path)
       # Ensure write permissions
       `chmod -R +w #{libsodium_path}`
-      # 1. Rename all utils.h files
-      `find #{libsodium_path} -name "utils.h"`.split("\n").each do |file|
-        if File.exist?(file)
-          dir = File.dirname(file)
-          `mv #{file} #{dir}/sodium_utils.h`
-        end
-      end
-      # 2. Update all includes
-      `grep -r "include \\\"utils.h\\\"" #{libsodium_path} | cut -d: -f1 | sort | uniq`.split("\n").each do |file|
-        content = File.read(file)
-        new_content = content.gsub(/include\s+\"utils\.h\"/, 'include "sodium_utils.h"')
-        File.write(file, new_content)
-      end
       
-      # 2b. Update sodium.h specifically
-      sodium_h = "Pods/libsodium/src/libsodium/include/sodium.h"
-      if File.exist?(sodium_h)
-        content = File.read(sodium_h)
-        new_content = content.gsub(/include\s+\"sodium\/utils\.h\"/, 'include "sodium/sodium_utils.h"')
-        File.write(sodium_h, new_content)
-      end
-      
-      # 3. Fix alignment error in blake2b by adding padding
+      # 1. Fix alignment error in blake2b by adding padding
       blake2b_header = "Pods/libsodium/src/libsodium/include/sodium/crypto_generichash_blake2b.h"
       if File.exist?(blake2b_header)
         content = File.read(blake2b_header)
-        # Original:
-        # typedef CRYPTO_ALIGN(64) struct crypto_generichash_blake2b_state {
-        #     uint64_t h[8];
-        #     uint64_t t[2];
-        #     uint64_t f[2];
-        #     uint8_t  buf[2 * 128];
-        #     size_t   buflen;
-        #     uint8_t  last_node;
-        # } crypto_generichash_blake2b_state;
-        # Size = 64 + 16 + 16 + 256 + 8 + 1 = 361. 
-        # Add 7 bytes of padding to reach 368 (divisible by 8).
         unless content.include?('uint8_t  _padding[7];')
           new_content = content.gsub(/uint8_t\s+last_node;/, "uint8_t  last_node;\n    uint8_t  _padding[7];")
                                .gsub(/CRYPTO_ALIGN\(64\)/, 'CRYPTO_ALIGN(8)')
