@@ -9,7 +9,7 @@
 This plugin is a **JSI-driven TurboDB embedded database** for React Native with the following core architecture:
 
 ```
-react-native-turbo-db/
+rn-turbo-db/
 ├── cpp/                    # Core C++ database engine
 ├── ios/                    # iOS native implementation + TurboModule codegen
 ├── android/                # Android native implementation + JNI

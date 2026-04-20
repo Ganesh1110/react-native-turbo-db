@@ -3,12 +3,12 @@
   "version": "1.0.0",
   "description": "High-performance JSI-driven embedded key-value database for React Native with encryption, WAL logging, B+tree indexing, and SSR/isomorphic support. Fast AsyncStorage alternative.",
   "main": "./lib/module/index.js",
-  "types": "./lib/typescript/src/index.d.ts",
   "exports": {
     ".": {
-      "types": "./lib/typescript/src/index.d.ts",
       "import": "./lib/module/index.js",
+      "import.types": "./lib/typescript/src/index.d.ts",
       "require": "./lib/module/index.js",
+      "require.types": "./lib/typescript/src/index.d.ts",
       "default": "./lib/module/index.js"
     },
     "./package.json": "./package.json"
@@ -78,14 +78,14 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Ganesh1110/react-native-turbo-db.git"
+    "url": "https://github.com/Ganesh1110/rn-turbo-db.git"
   },
   "author": "Ganesh Jayaprakash <ganesh@example.com> (https://github.com/ganeshjayaprakash)",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/Ganesh1110/react-native-turbo-db/issues"
+    "url": "https://github.com/Ganesh1110/rn-turbo-db/issues"
   },
-  "homepage": "https://github.com/Ganesh1110/react-native-turbo-db#readme",
+  "homepage": "https://github.com/Ganesh1110/rn-turbo-db#readme",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },

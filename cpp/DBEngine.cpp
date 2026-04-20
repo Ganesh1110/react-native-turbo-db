@@ -665,12 +665,10 @@ bool DBEngine::repairInternal() {
         pbtree_ = std::make_unique<PersistentBPlusTree>(mmap_.get(), wal_.get());
         pbtree_->init();
         btree_  = std::make_unique<BufferedBTree>(pbtree_.get());
-            // Wait, we can't share MMapRegion directly for a second tree without collisions. 
-            // The cleanest way: A dedicated oplog MMapRegion. But we don't have an `oplog_mmap_`.
-            // Let's store oplog keys directly in the SAME tree, prefixed with "__oplog:".
-            // That guarantees atomicity. So we don't need `oplog_pbtree_`!
-            // We can just use the main `btree_`.
-            LOGI("initStorage: Sync enabled, using __oplog: prefix in main tree.");
+        compactor_ = std::make_unique<Compactor>(db_path, crypto_.get());
+        
+        if (sync_enabled_) {
+            LOGI("repairInternal: Sync enabled, initializing logical clock.");
             initializeLogicalClock();
         }
 
