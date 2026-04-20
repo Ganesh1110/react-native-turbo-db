@@ -13,7 +13,7 @@ import {
   LayoutAnimation,
   UIManager,
 } from 'react-native';
-import { TurboDB } from 'react-native-turbo-db';
+import { TurboDB } from 'rn-turbo-db';
 
 if (
   Platform.OS === 'android' &&
