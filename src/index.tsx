@@ -6,6 +6,7 @@ const NativeTurboDB =
 
 declare const global: {
   NativeDB: {
+    // ── Sync API ──
     initStorage(path: string, size: number): boolean;
     insertRec(key: string, obj: any): boolean;
     findRec(key: string): any;
@@ -16,14 +17,13 @@ declare const global: {
     del(key: string): boolean;
     deleteAll(): boolean;
     benchmark(): number;
-    rangeQuery(
-      startKey: string,
-      endKey: string
-    ): Array<{ key: string; value: any }>;
+    rangeQuery(startKey: string, endKey: string): Array<{ key: string; value: any }>;
     getAllKeys(): string[];
     getAllKeysPaged(limit: number, offset: number): string[];
     flush(): void;
-    // Async variants
+    // ── Async API ──
+    setAsync(args: { key: string; value: any }): Promise<boolean>;
+    getAsync(key: string): Promise<any>;
     setMultiAsync(entries: Record<string, any>): Promise<boolean>;
     getMultipleAsync(keys: string[]): Promise<Record<string, any>>;
     rangeQueryAsync(args: {
@@ -31,6 +31,21 @@ declare const global: {
       endKey: string;
     }): Promise<Array<{ key: string; value: any }>>;
     getAllKeysAsync(): Promise<string[]>;
+    removeAsync(key: string): Promise<boolean>;
+    // ── Diagnostics ──
+    verifyHealth(): boolean;
+    repair(): boolean;
+    getDatabasePath(): string;
+    getWALPath(): string;
+    getStats(): {
+      treeHeight: number;
+      nodeCount: number;
+      formatVersion: number;
+      fragmentationRatio: number;
+      isInitialized: boolean;
+      secureMode: boolean;
+    };
+    setSecureMode(enable: boolean): void;
   };
 };
 
@@ -41,13 +56,45 @@ export interface RangeQueryResult {
   value: any;
 }
 
+export interface DBStats {
+  treeHeight: number;
+  nodeCount: number;
+  formatVersion: number;
+  fragmentationRatio: number;
+  isInitialized: boolean;
+  secureMode: boolean;
+}
+
+/**
+ * TurboDB — high-performance JSI-based persistent database.
+ *
+ * Usage:
+ *   const db = await TurboDB.create('/path/to/db');
+ *   await db.setAsync('key', { value: 42 });
+ *   const val = await db.getAsync('key');
+ */
 export class TurboDB {
+  /**
+   * ✅ Preferred factory — async, no busy-wait, no JS thread blocking.
+   */
+  static async create(
+    path: string,
+    size: number = 10 * 1024 * 1024
+  ): Promise<TurboDB> {
+    const db = new TurboDB(path, size);
+    await db._initAsync();
+    return db;
+  }
+
+  /**
+   * Install the native JSI global. Call once at app startup
+   * (e.g., in index.js before any DB usage).
+   */
   static install(): void {
     if (!NativeTurboDB) {
       console.error(
-        "TurboDB: Native module 'TurboDB' not found. " +
-          'Ensure you have rebuilt the native app (npx react-native run-ios / run-android) ' +
-          'and that the module is correctly linked.'
+        "[TurboDB] Native module 'TurboDB' not found. " +
+          'Rebuild the native app (npx react-native run-ios / run-android).'
       );
       return;
     }
@@ -61,46 +108,71 @@ export class TurboDB {
 
   private isInitialized = false;
 
+  /**
+   * ⚠️ Prefer `TurboDB.create()` over the constructor.
+   * If you use the constructor, call `ensureInitialized()` (sync) only
+   * for simple use-cases that can tolerate blocking on first access.
+   */
   constructor(
     private path: string,
     private size: number = 10 * 1024 * 1024
   ) {}
 
-  private ensureInitialized() {
-    if (!this.isInitialized) {
-      if (!NativeTurboDB) {
-        throw new Error(
-          'TurboDB: Native module not found. Check your native build.'
-        );
-      }
+  /**
+   * Async init — no busy-wait, returns Promise.
+   * Called internally by `TurboDB.create()`.
+   */
+  private async _initAsync(): Promise<void> {
+    if (this.isInitialized) return;
 
-      // Try to install and check for NativeDB
-      for (let i = 0; i < 3; i++) {
-        TurboDB.install();
-        if (typeof global.NativeDB !== 'undefined') {
-          break;
-        }
-        // Small delay if not found immediately (for New Arch async behavior)
-        // We use a busy-wait since this is synchronous initialization
-        const start = Date.now();
-        while (Date.now() - start < 10) {}
-      }
-
-      if (typeof global.NativeDB === 'undefined') {
-        throw new Error(
-          'TurboDB: NativeDB JSI object not found after install(). Check native logs.'
-        );
-      }
-
-      const success = global.NativeDB.initStorage(this.path, this.size);
-      if (!success) {
-        throw new Error(`Failed to initialize TurboDB at ${this.path}`);
-      }
-      this.isInitialized = true;
+    if (!NativeTurboDB) {
+      throw new Error('[TurboDB] Native module not found. Check your native build.');
     }
+
+    TurboDB.install();
+
+    if (typeof global.NativeDB === 'undefined') {
+      throw new Error(
+        '[TurboDB] NativeDB JSI object not found after install(). ' +
+          'Check native logs for errors.'
+      );
+    }
+
+    const success = global.NativeDB.initStorage(this.path, this.size);
+    if (!success) {
+      throw new Error(`[TurboDB] Failed to initialize storage at ${this.path}`);
+    }
+    this.isInitialized = true;
   }
 
-  // --- Synchronous API ---
+  /**
+   * Sync init — only for backward compat. Prefer async.
+   * Does NOT use a busy-wait — throws immediately if NativeDB is not ready.
+   */
+  private ensureInitialized(): void {
+    if (this.isInitialized) return;
+
+    if (!NativeTurboDB) {
+      throw new Error('[TurboDB] Native module not found. Check your native build.');
+    }
+
+    TurboDB.install();
+
+    if (typeof global.NativeDB === 'undefined') {
+      throw new Error(
+        '[TurboDB] NativeDB not found. ' +
+          'Use TurboDB.create() for async initialization.'
+      );
+    }
+
+    const success = global.NativeDB.initStorage(this.path, this.size);
+    if (!success) {
+      throw new Error(`[TurboDB] Failed to initialize storage at ${this.path}`);
+    }
+    this.isInitialized = true;
+  }
+
+  // ── Synchronous API (fast path) ──────────────────────────────────────────
 
   has(key: string): boolean {
     this.ensureInitialized();
@@ -132,6 +204,7 @@ export class TurboDB {
     return global.NativeDB.remove(key);
   }
 
+  /** Alias for remove() */
   del(key: string): boolean {
     return this.remove(key);
   }
@@ -156,6 +229,7 @@ export class TurboDB {
     return global.NativeDB.getAllKeys();
   }
 
+  /** O(limit) paged enumeration — does NOT load all keys */
   getAllKeysPaged(limit: number, offset: number): string[] {
     this.ensureInitialized();
     return global.NativeDB.getAllKeysPaged(limit, offset);
@@ -171,26 +245,45 @@ export class TurboDB {
     global.NativeDB.flush();
   }
 
-  // --- Asynchronous API ---
+  // ── Asynchronous API (non-blocking — all run on DBWorker thread) ──────────
 
+  /**
+   * Async set — serializes value on JS thread, writes on DBWorker thread.
+   * Does NOT block the JS thread.
+   */
   async setAsync(key: string, value: any): Promise<boolean> {
-    return this.set(key, value);
+    this.ensureInitialized();
+    return global.NativeDB.setAsync({ key, value });
   }
 
+  /**
+   * Async get — reads on DBWorker thread, deserializes back on JS thread.
+   */
   async getAsync<T = any>(key: string): Promise<T | undefined> {
-    return this.get<T>(key);
+    this.ensureInitialized();
+    return global.NativeDB.getAsync(key);
   }
 
+  /**
+   * Async batch set — serializes all values on JS thread, writes in batch on DBWorker.
+   * Ideal for 100+ record writes.
+   */
   async setMultiAsync(entries: Record<string, any>): Promise<boolean> {
     this.ensureInitialized();
     return global.NativeDB.setMultiAsync(entries);
   }
 
+  /**
+   * Async batch get — reads on DBWorker thread, returns results map.
+   */
   async getMultipleAsync(keys: string[]): Promise<Record<string, any>> {
     this.ensureInitialized();
     return global.NativeDB.getMultipleAsync(keys);
   }
 
+  /**
+   * Async range query — reads on DBWorker thread without blocking UI.
+   */
   async rangeQueryAsync(
     startKey: string,
     endKey: string
@@ -199,9 +292,56 @@ export class TurboDB {
     return global.NativeDB.rangeQueryAsync({ startKey, endKey });
   }
 
+  /**
+   * Async get all keys — enumerates on DBWorker thread.
+   */
   async getAllKeysAsync(): Promise<string[]> {
     this.ensureInitialized();
     return global.NativeDB.getAllKeysAsync();
+  }
+
+  /**
+   * Async remove — executes on DBWorker thread,
+   * also schedules compaction if fragmentation > 30%.
+   */
+  async removeAsync(key: string): Promise<boolean> {
+    this.ensureInitialized();
+    return global.NativeDB.removeAsync(key);
+  }
+
+  // ── Diagnostics ───────────────────────────────────────────────────────────
+
+  verifyHealth(): boolean {
+    this.ensureInitialized();
+    return global.NativeDB.verifyHealth();
+  }
+
+  repair(): boolean {
+    this.ensureInitialized();
+    return global.NativeDB.repair();
+  }
+
+  getDatabasePath(): string {
+    this.ensureInitialized();
+    return global.NativeDB.getDatabasePath();
+  }
+
+  getWALPath(): string {
+    this.ensureInitialized();
+    return global.NativeDB.getWALPath();
+  }
+
+  /**
+   * Get live database stats: tree height, node count, fragmentation ratio, etc.
+   */
+  getStats(): DBStats {
+    this.ensureInitialized();
+    return global.NativeDB.getStats();
+  }
+
+  setSecureMode(enable: boolean): void {
+    this.ensureInitialized();
+    global.NativeDB.setSecureMode(enable);
   }
 }
 

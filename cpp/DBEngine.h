@@ -13,8 +13,10 @@
 #include "ArenaAllocator.h"
 #include "BinarySerializer.h"
 #include "SecureCryptoContext.h"
-#include "ThreadPool.h"
 #include "WALManager.h"
+#include "DBScheduler.h"
+#include "Compactor.h"
+#include "TurboDBError.h"
 
 namespace turbo_db {
 
@@ -26,61 +28,97 @@ public:
         std::shared_ptr<facebook::react::CallInvoker> js_invoker,
         std::unique_ptr<SecureCryptoContext> crypto = nullptr
     );
-    
-    ~DBEngine() {
-        if (mmap_) {
-            mmap_->sync();
-            std::cout << "DBEngine: MMap synced and destroyed" << std::endl;
-        } else {
-            std::cout << "DBEngine: Destroyed" << std::endl;
-        }
-    }
-    
-    facebook::jsi::Value get(facebook::jsi::Runtime& runtime, 
+
+    ~DBEngine();
+
+    facebook::jsi::Value get(facebook::jsi::Runtime& runtime,
                               const facebook::jsi::PropNameID& name) override;
-    
-    std::vector<facebook::jsi::PropNameID> getPropertyNames(facebook::jsi::Runtime& runtime) override;
-    
+
+    std::vector<facebook::jsi::PropNameID> getPropertyNames(
+        facebook::jsi::Runtime& runtime) override;
+
     double add(double a, double b);
     std::string echo(const std::string& message);
     double benchmark();
-    
-    // Phase 3 MMap Methods
+
+    // Storage init
     bool initStorage(const std::string& path, size_t size);
+
+    // Raw mmap access (legacy)
     void write(size_t offset, const std::string& data);
     std::string read(size_t offset, size_t length);
-    
-    // Phase 4 Methods
-    facebook::jsi::Value insertRec(facebook::jsi::Runtime& runtime, const std::string& key, const facebook::jsi::Value& obj);
-    facebook::jsi::Value findRec(facebook::jsi::Runtime& runtime, const std::string& key);
+
+    // Synchronous API (fast path — still runs on JS thread)
+    facebook::jsi::Value insertRec(facebook::jsi::Runtime& runtime,
+                                    const std::string& key,
+                                    const facebook::jsi::Value& obj);
+    facebook::jsi::Value findRec(facebook::jsi::Runtime& runtime,
+                                  const std::string& key);
     bool clearStorage();
     void flush();
-    
-    // Batch Operations
-    facebook::jsi::Value setMulti(facebook::jsi::Runtime& runtime, const facebook::jsi::Value& entries);
-    facebook::jsi::Value getMultiple(facebook::jsi::Runtime& runtime, const facebook::jsi::Value& keys);
+
+    // Batch sync ops
+    facebook::jsi::Value setMulti(facebook::jsi::Runtime& runtime,
+                                   const facebook::jsi::Value& entries);
+    facebook::jsi::Value getMultiple(facebook::jsi::Runtime& runtime,
+                                      const facebook::jsi::Value& keys);
     bool remove(const std::string& key);
 
-    // Async Operations (Promise-based, non-blocking)
-    facebook::jsi::Value setMultiAsync(facebook::jsi::Runtime& runtime, const facebook::jsi::Value& entries);
-    facebook::jsi::Value getMultipleAsync(facebook::jsi::Runtime& runtime, const facebook::jsi::Value& keys);
-    facebook::jsi::Value rangeQueryAsync(facebook::jsi::Runtime& runtime, const facebook::jsi::Value& args);
+    // ── Fully async ops (non-blocking, scheduled on DBWorker thread) ──
+    facebook::jsi::Value setAsync(facebook::jsi::Runtime& runtime,
+                                   const facebook::jsi::Value& args);
+    facebook::jsi::Value getAsync(facebook::jsi::Runtime& runtime,
+                                   const facebook::jsi::Value& args);
+    facebook::jsi::Value setMultiAsync(facebook::jsi::Runtime& runtime,
+                                        const facebook::jsi::Value& entries);
+    facebook::jsi::Value getMultipleAsync(facebook::jsi::Runtime& runtime,
+                                          const facebook::jsi::Value& keys);
+    facebook::jsi::Value rangeQueryAsync(facebook::jsi::Runtime& runtime,
+                                         const facebook::jsi::Value& args);
     facebook::jsi::Value getAllKeysAsync(facebook::jsi::Runtime& runtime);
-    
-    // Query Operations
+    facebook::jsi::Value removeAsync(facebook::jsi::Runtime& runtime,
+                                      const facebook::jsi::Value& args);
+
+    // Query ops (sync)
     std::vector<std::pair<std::string, facebook::jsi::Value>> rangeQuery(
-        facebook::jsi::Runtime& runtime, 
-        const std::string& startKey, 
-        const std::string& endKey
-    );
-    
+        facebook::jsi::Runtime& runtime,
+        const std::string& startKey,
+        const std::string& endKey);
+
     std::vector<std::string> getAllKeys();
     std::vector<std::string> getAllKeysPaged(int limit, int offset);
+
     bool deleteAll();
-    
+
+    // Health & diagnostics
+    bool verifyHealth();
+    bool repair();
+    facebook::jsi::Value getStats(facebook::jsi::Runtime& runtime);
+    std::string getDatabasePath() const;
+    std::string getWALPath() const;
+    void setSecureMode(bool enable);
+
 private:
-    facebook::jsi::Value insertRecInternal(facebook::jsi::Runtime& runtime, const std::string& key, const facebook::jsi::Value& obj, bool shouldCommit);
-    
+    // Promise helpers
+    facebook::jsi::Value createPromise(
+        facebook::jsi::Runtime& runtime,
+        std::function<void(
+            std::shared_ptr<facebook::jsi::Function> resolve,
+            std::shared_ptr<facebook::jsi::Function> reject)> executor);
+
+    // Core insert (must be called on DBWorker or under unique_lock)
+    facebook::jsi::Value insertRecInternal(facebook::jsi::Runtime& runtime,
+                                            const std::string& key,
+                                            const facebook::jsi::Value& obj,
+                                            bool shouldCommit);
+
+    // Byte-level insert called from async path (no jsi::Runtime needed)
+    bool insertRecBytes(const std::string& key,
+                         const std::vector<uint8_t>& bytes,
+                         bool shouldCommit = true);
+
+    bool repairInternal();
+
     mutable std::shared_mutex rw_mutex_;
     std::chrono::high_resolution_clock::time_point start_time_;
     std::unique_ptr<SecureCryptoContext> crypto_;
@@ -88,19 +126,14 @@ private:
     std::unique_ptr<PersistentBPlusTree> pbtree_;
     std::unique_ptr<BufferedBTree> btree_;
     std::unique_ptr<WALManager> wal_;
+    std::unique_ptr<DBScheduler> scheduler_;
+    std::unique_ptr<Compactor> compactor_;
+
     size_t next_free_offset_;
     ArenaAllocator arena_;
-    std::unique_ptr<ThreadPool> thread_pool_;
     std::shared_ptr<facebook::react::CallInvoker> js_invoker_;
     bool is_secure_mode_ = true;
     bool needs_repair_ = false;
-
-    void setSecureMode(bool enable);
-    bool repair();
-    bool repairInternal();
-    bool verifyHealth();
-    std::string getDatabasePath() const;
-    std::string getWALPath() const;
 };
 
 void installDBEngine(
@@ -109,4 +142,4 @@ void installDBEngine(
     std::unique_ptr<SecureCryptoContext> crypto = nullptr
 );
 
-}
+} // namespace turbo_db

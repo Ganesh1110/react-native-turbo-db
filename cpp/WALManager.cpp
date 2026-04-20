@@ -1,10 +1,20 @@
 #include "WALManager.h"
 #include "MMapRegion.h"
 #include <iostream>
-#include <filesystem>
 #include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
+#include <vector>
+#include <stdexcept>
+
+#ifdef __ANDROID__
+#include <android/log.h>
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "TurboDB_WAL", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "TurboDB_WAL", __VA_ARGS__)
+#else
+#define LOGI(...) do {} while(0)
+#define LOGE(...) do {} while(0)
+#endif
 
 namespace turbo_db {
 
@@ -31,6 +41,12 @@ WALManager::~WALManager() {
     if (wal_file_.is_open()) {
         wal_file_.close();
     }
+#ifdef __ANDROID__
+    if (wal_fd_ >= 0) {
+        ::close(wal_fd_);
+        wal_fd_ = -1;
+    }
+#endif
 }
 
 uint32_t WALManager::calculate_crc32(const uint8_t* data, size_t length) {
@@ -46,11 +62,19 @@ uint32_t WALManager::calculate_crc32(const uint8_t* data, size_t length) {
 
 void WALManager::appendRecord(const WALRecordHeader& header, const uint8_t* payload, size_t length) {
     if (!wal_file_.is_open()) return;
-    
     wal_file_.write(reinterpret_cast<const char*>(&header), sizeof(WALRecordHeader));
     if (payload && length > 0) {
         wal_file_.write(reinterpret_cast<const char*>(payload), length);
     }
+}
+
+void WALManager::logBegin() {
+    WALRecordHeader header;
+    header.length   = sizeof(WALRecordHeader);
+    header.type     = WALRecordType::TX_BEGIN;
+    header.offset   = 0;
+    header.checksum = 0;
+    appendRecord(header, nullptr, 0);
 }
 
 void WALManager::logPageWrite(uint64_t offset, const std::string& data) {
@@ -58,62 +82,61 @@ void WALManager::logPageWrite(uint64_t offset, const std::string& data) {
 }
 
 void WALManager::logPageWrite(uint64_t offset, const uint8_t* data, size_t length) {
-    const uint8_t* payload_ptr = data;
-    size_t payload_len = length;
-    std::vector<uint8_t> encrypted;
-
-    if (crypto_) {
-        encrypted = crypto_->encrypt(data, length);
-        payload_ptr = encrypted.data();
-        payload_len = encrypted.size();
-    }
-
+    // ⚠️ IMPORTANT: data is already encrypted by the caller (insertRecInternal /
+    // setMulti). WALManager intentionally does NOT re-encrypt — that was the
+    // double-encryption bug. We store exactly what we receive.
     WALRecordHeader header;
-    header.length = sizeof(WALRecordHeader) + payload_len;
-    header.type = WALRecordType::PAGE_WRITE;
-    header.offset = offset;
-    header.checksum = calculate_crc32(payload_ptr, payload_len);
-
-    appendRecord(header, payload_ptr, payload_len);
+    header.length   = static_cast<uint32_t>(sizeof(WALRecordHeader) + length);
+    header.type     = WALRecordType::PAGE_WRITE;
+    header.offset   = offset;
+    header.checksum = calculate_crc32(data, length);
+    appendRecord(header, data, length);
 }
 
 void WALManager::logCommit() {
     WALRecordHeader header;
-    header.length = sizeof(WALRecordHeader);
-    header.type = WALRecordType::COMMIT;
-    header.offset = 0;
+    header.length   = sizeof(WALRecordHeader);
+    header.type     = WALRecordType::COMMIT;
+    header.offset   = 0;
     header.checksum = 0;
-
     appendRecord(header, nullptr, 0);
     wal_file_.flush();
 }
 
 void WALManager::checkpoint() {
-    // In a full implementation, this would:
-    // 1. Flush all main DB pages (msync).
-    // 2. Truncate WAL.
     wal_file_.flush();
     clear();
 }
 
 bool WALManager::sync() {
     if (!wal_file_.is_open()) return false;
-
     wal_file_.flush();
 
 #ifdef __ANDROID__
     if (wal_fd_ >= 0) {
-        fsync(wal_fd_);
+        fdatasync(wal_fd_);
     }
 #else
-    // iOS/macOS: Get file descriptor and fsync
+    // iOS/macOS: open separately for fsync (std::ofstream doesn't expose fd)
     int fd = ::open(wal_path_.c_str(), O_RDONLY);
     if (fd >= 0) {
-        fsync(fd);
+        ::fdatasync(fd);
         ::close(fd);
     }
 #endif
     return true;
+}
+
+bool WALManager::archiveWAL() {
+    if (wal_file_.is_open()) {
+        wal_file_.close();
+    }
+    std::string bak = wal_path_ + ".bak";
+    // Remove old backup if it exists
+    std::remove(bak.c_str());
+    int rc = std::rename(wal_path_.c_str(), bak.c_str());
+    LOGI("WAL archived to %s (rc=%d)", bak.c_str(), rc);
+    return rc == 0;
 }
 
 void WALManager::clear() {
@@ -122,57 +145,170 @@ void WALManager::clear() {
     }
     std::remove(wal_path_.c_str());
     wal_file_.open(wal_path_, std::ios::binary | std::ios::app);
+#ifdef __ANDROID__
+    if (wal_fd_ >= 0) ::close(wal_fd_);
+    wal_fd_ = ::open(wal_path_.c_str(), O_WRONLY | O_APPEND);
+#endif
 }
+
+// ---------------------------------------------------------------------------
+// 2-Pass Commit-Aware Recovery
+// ---------------------------------------------------------------------------
 
 void WALManager::recover(MMapRegion* mmap) {
+    recoverSafe(mmap);
+}
+
+bool WALManager::recoverSafe(MMapRegion* mmap) {
     std::ifstream reader(wal_path_, std::ios::binary);
-    if (!reader.is_open()) return;
+    if (!reader.is_open()) {
+        LOGI("WAL: no WAL file found at %s, nothing to recover", wal_path_.c_str());
+        return false;
+    }
 
-    std::cout << "Starting WAL Recovery for " << wal_path_ << "...\n";
+    LOGI("WAL Recovery: starting 2-pass recovery for %s", wal_path_.c_str());
 
-    // 1st Pass: Identify committed transaction ranges
-    // For this prototype, we'll replay everything valid, but usually we'd only replay committed blocks.
-    
-    while (reader.peek() != EOF) {
-        WALRecordHeader header;
-        reader.read(reinterpret_cast<char*>(&header), sizeof(WALRecordHeader));
-        if (reader.gcount() < sizeof(WALRecordHeader)) break;
+    // -------------------------------------------------------------------------
+    // Pass 1: Identify committed transaction boundaries
+    // -------------------------------------------------------------------------
+    // A committed transaction is: [TX_BEGIN?...][PAGE_WRITE*][COMMIT]
+    // We collect the file position ranges of all such committed groups.
+    // -------------------------------------------------------------------------
+    std::vector<TxRange> committed_ranges;
+    std::streampos tx_start = 0;
+    bool in_tx = false;
+    size_t total_records = 0;
+    size_t committed_txs = 0;
 
-        if (header.type == WALRecordType::PAGE_WRITE) {
-            if (header.length < sizeof(WALRecordHeader)) {
-                std::cerr << "WAL Recovery: Invalid record length. Skipping.\n";
-                continue;
+    reader.seekg(0, std::ios::beg);
+
+    while (reader.peek() != std::char_traits<char>::eof()) {
+        std::streampos record_start = reader.tellg();
+
+        WALRecordHeader hdr;
+        reader.read(reinterpret_cast<char*>(&hdr), sizeof(WALRecordHeader));
+        if (reader.gcount() < static_cast<std::streamsize>(sizeof(WALRecordHeader))) break;
+
+        total_records++;
+
+        if (hdr.type == WALRecordType::TX_BEGIN) {
+            tx_start = record_start;
+            in_tx = true;
+            // No payload for TX_BEGIN
+        } else if (hdr.type == WALRecordType::PAGE_WRITE) {
+            if (!in_tx) {
+                // Implicit transaction start (legacy records without TX_BEGIN)
+                tx_start = record_start;
+                in_tx = true;
             }
-            size_t payload_len = header.length - sizeof(WALRecordHeader);
-            std::vector<char> payload_buffer(payload_len);
-            reader.read(payload_buffer.data(), payload_len);
-            if (reader.gcount() != static_cast<std::streamsize>(payload_len)) {
-                std::cerr << "WAL Recovery: Read " << reader.gcount() << " bytes, expected " << payload_len << "\n";
-                continue;
+            size_t payload_len = 0;
+            if (hdr.length > sizeof(WALRecordHeader)) {
+                payload_len = hdr.length - sizeof(WALRecordHeader);
             }
-
-            uint32_t current_crc = calculate_crc32(reinterpret_cast<const uint8_t*>(payload_buffer.data()), payload_len);
-            if (current_crc == header.checksum) {
-                std::string decrypted = payload_buffer.data();
-                if (crypto_) {
-                    std::vector<uint8_t> dec_bytes = crypto_->decrypt(
-                        reinterpret_cast<const uint8_t*>(payload_buffer.data()), payload_len);
-                    decrypted.assign(reinterpret_cast<const char*>(dec_bytes.data()), dec_bytes.size());
-                }
-
-                std::cout << "Replaying write at offset " << header.offset << " (" << decrypted.size() << " bytes)\n";
-                mmap->write(header.offset, decrypted);
-            } else {
-                std::cerr << "WAL Recovery: Checksum mismatch at offset " << header.offset << ". Skipping corrupted log.\n";
+            reader.seekg(static_cast<std::streamoff>(payload_len), std::ios::cur);
+            if (!reader.good()) break;
+        } else if (hdr.type == WALRecordType::COMMIT) {
+            if (in_tx) {
+                committed_ranges.push_back({tx_start, record_start});
+                committed_txs++;
             }
-        } else if (header.type == WALRecordType::COMMIT) {
-            std::cout << "Transaction COMMIT found in WAL.\n";
+            in_tx = false;
+        } else if (hdr.type == WALRecordType::CHECKPOINT) {
+            // Checkpoint means everything before here was already applied
+            committed_ranges.clear();
+            in_tx = false;
+        } else {
+            // Unknown record type — WAL is corrupt from here; stop
+            LOGE("WAL Recovery: unknown record type 0x%02x at pos, stopping pass 1",
+                 static_cast<uint8_t>(hdr.type));
+            break;
         }
     }
-    
+
+    if (in_tx) {
+        LOGI("WAL Recovery: last transaction was NOT committed (tail crash), discarding");
+    }
+
+    LOGI("WAL Recovery: pass 1 done — %zu records, %zu committed transactions",
+         total_records, committed_txs);
+
+    if (committed_ranges.empty()) {
+        LOGI("WAL Recovery: no committed transactions found, nothing to replay");
+        reader.close();
+        return false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Pass 2: Replay only PAGE_WRITE records inside committed ranges
+    // -------------------------------------------------------------------------
+    size_t replayed = 0;
+    size_t skipped_crc = 0;
+
+    for (const auto& range : committed_ranges) {
+        reader.clear();
+        reader.seekg(range.begin_pos, std::ios::beg);
+
+        while (reader.tellg() < range.commit_pos && reader.good()) {
+            WALRecordHeader hdr;
+            reader.read(reinterpret_cast<char*>(&hdr), sizeof(WALRecordHeader));
+            if (reader.gcount() < static_cast<std::streamsize>(sizeof(WALRecordHeader))) break;
+
+            if (hdr.type == WALRecordType::TX_BEGIN) {
+                // No payload, skip
+                continue;
+            }
+
+            if (hdr.type != WALRecordType::PAGE_WRITE) {
+                // Should not happen inside a committed range, but be safe
+                continue;
+            }
+
+            size_t payload_len = 0;
+            if (hdr.length > sizeof(WALRecordHeader)) {
+                payload_len = hdr.length - sizeof(WALRecordHeader);
+            }
+
+            if (payload_len == 0) continue;
+
+            std::vector<uint8_t> payload(payload_len);
+            reader.read(reinterpret_cast<char*>(payload.data()), payload_len);
+            if (static_cast<size_t>(reader.gcount()) != payload_len) {
+                LOGE("WAL Recovery: short read on PAGE_WRITE payload, skipping");
+                break;
+            }
+
+            // CRC validation
+            uint32_t computed = calculate_crc32(payload.data(), payload_len);
+            if (computed != hdr.checksum) {
+                LOGE("WAL Recovery: CRC mismatch at offset %llu — skipping",
+                     static_cast<unsigned long long>(hdr.offset));
+                skipped_crc++;
+                continue;
+            }
+
+            // NOTE: payload is already in its final form (encrypted if the DB uses
+            // encryption). Just write it directly — no decryption step needed here,
+            // because WAL stores exactly what was written to the main file.
+            if (hdr.offset + payload_len <= mmap->getSize()) {
+                mmap->write(hdr.offset, payload.data(), payload_len);
+                replayed++;
+            } else {
+                LOGE("WAL Recovery: write offset %llu + %zu exceeds mmap size %zu, skipping",
+                     static_cast<unsigned long long>(hdr.offset), payload_len, mmap->getSize());
+            }
+        }
+    }
+
     reader.close();
-    mmap->sync(); // Ensure replayed data is flushed
-    checkpoint();  // Clear WAL after recovery
+    mmap->sync(); // Flush all replayed pages to disk
+
+    LOGI("WAL Recovery: complete — %zu records replayed, %zu CRC failures",
+         replayed, skipped_crc);
+
+    // Checkpoint (clear WAL) after successful recovery
+    checkpoint();
+
+    return replayed > 0;
 }
 
-}
+} // namespace turbo_db

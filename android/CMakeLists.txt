@@ -13,13 +13,15 @@ add_library(react-native-turbo-db SHARED
     ../cpp/BinarySerializer.cpp
     ../cpp/BufferedBTree.cpp
     ../cpp/DBEngine.cpp
+    ../cpp/DBScheduler.cpp
+    ../cpp/Compactor.cpp
     ../cpp/MMapRegion.cpp
     ../cpp/PersistentBPlusTree.cpp
     ../cpp/WALManager.cpp
     ../cpp/SodiumCryptoContext.cpp
     ../cpp/CachedCryptoContext.cpp
     ../cpp/LazyRecordProxy.cpp
-    ../cpp/ThreadPool.cpp
+    # ThreadPool.cpp removed — replaced by DBScheduler
 )
 
 set_target_properties(
