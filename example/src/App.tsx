@@ -189,7 +189,12 @@ export default function App() {
     const docPath = TurboDB.getDocumentsDirectory();
     setDbPath(docPath);
     const dbFile = `${docPath}/secure_v1.db`;
-    setDb(new TurboDB(dbFile, 10 * 1024 * 1024, { syncEnabled: true }));
+    const newDb = new TurboDB(dbFile, 10 * 1024 * 1024, { syncEnabled: true });
+    console.log('=== DB INIT DEBUG ===');
+    console.log('DB Path:', dbFile);
+    console.log('syncEnabled: true');
+    console.log('====================');
+    setDb(newDb);
   }, []);
 
   useEffect(() => {
@@ -263,7 +268,21 @@ export default function App() {
         style: 'destructive',
         onPress: () => {
           try {
+            console.log('=== DELETE DEBUG ===');
+            console.log('Key to delete:', key);
+            console.log('DB path:', db.getDatabasePath());
+
             const result = db.del(key);
+            console.log('Delete result:', result);
+
+            // Immediately check after delete
+            const valAfterDelete = db.get(key);
+            console.log('Value AFTER delete:', valAfterDelete);
+
+            const allKeysAfterDelete = db.getAllKeys();
+            console.log('All keys AFTER delete:', allKeysAfterDelete);
+            console.log('=====================');
+
             if (result) {
               setGetResult('');
               refreshKeys();

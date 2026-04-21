@@ -13,8 +13,9 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #else
-#define LOGI(...) do {} while(0)
-#define LOGE(...) do {} while(0)
+#include <iostream>
+#define LOGI(...) fprintf(stdout, "[TurboDB] "); fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n")
+#define LOGE(...) fprintf(stderr, "[TurboDB ERROR] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n")
 #endif
 
 namespace turbo_db {
@@ -858,8 +859,12 @@ bool DBEngine::insertRecBytes(
     const std::vector<uint8_t>& plain_bytes,
     bool shouldCommit,
     bool is_tombstone,
-    SyncMetadata* explicit_meta)
+    SyncMetadata* explicit_meta,
+    size_t* outOffset)
 {
+    LOGI("insertRecBytes: key=%s, bytes_size=%zu, shouldCommit=%d, is_tombstone=%d, sync_enabled_=%d",
+         key.c_str(), plain_bytes.size(), shouldCommit, is_tombstone, sync_enabled_);
+    
     if (!btree_ || !mmap_) return false;
 
     if (key.size() >= BTreeNode::KEY_SIZE) {
@@ -868,14 +873,22 @@ bool DBEngine::insertRecBytes(
     }
 
     try {
-        const uint8_t* payload_ptr = plain_bytes.data();
+        const uint8_t* payload_ptr = nullptr;
         size_t payload_len = plain_bytes.size();
         std::vector<uint8_t> encrypted;
 
-        if (crypto_ && !is_tombstone) {
-            encrypted   = crypto_->encrypt(plain_bytes.data(), plain_bytes.size());
-            payload_ptr = encrypted.data();
-            payload_len = encrypted.size();
+        // Handle empty bytes (used for tombstones)
+        if (payload_len > 0) {
+            payload_ptr = plain_bytes.data();
+        
+            if (crypto_ && !is_tombstone) {
+                encrypted   = crypto_->encrypt(plain_bytes.data(), plain_bytes.size());
+                payload_ptr = encrypted.data();
+                payload_len = encrypted.size();
+            }
+        } else {
+            // Empty payload for tombstone - payload_ptr stays nullptr, payload_len is 0
+            LOGI("insertRecBytes: empty payload (tombstone)");
         }
 
         std::unique_lock lock(rw_mutex_);
@@ -952,6 +965,10 @@ bool DBEngine::insertRecBytes(
             compactor_->trackLiveBytes(sizeof(uint32_t) + payload_len + sizeof(uint32_t), true);
         }
 
+        if (outOffset) {
+            *outOffset = offset;
+        }
+
         return true;
     } catch (const std::exception& e) {
         LOGE("insertRecBytes: %s", e.what());
@@ -1004,7 +1021,11 @@ facebook::jsi::Value DBEngine::findRec(
         if (sync_enabled_) {
             if (payload_len < sizeof(SyncMetadata)) return facebook::jsi::Value::undefined();
             const SyncMetadata* meta = reinterpret_cast<const SyncMetadata*>(payload_ptr);
-            if (meta->flags & SYNC_FLAG_TOMBSTONE) return facebook::jsi::Value::undefined();
+            LOGI("findRec: key=%s, payload_len=%u, meta->flags=0x%02x", key.c_str(), payload_len, meta->flags);
+            if (meta->flags & SYNC_FLAG_TOMBSTONE) {
+                LOGI("findRec: key=%s is a TOMBSTONE, returning undefined", key.c_str());
+                return facebook::jsi::Value::undefined();
+            }
             payload_ptr += sizeof(SyncMetadata);
             payload_len -= sizeof(SyncMetadata);
         }
@@ -1138,15 +1159,24 @@ facebook::jsi::Value DBEngine::getMultiple(
 }
 
 bool DBEngine::remove(const std::string& key) {
-    if (!btree_ || !pbtree_ || !mmap_) return false;
+    LOGI("remove: START, key=%s", key.c_str());
+    
+    if (!btree_ || !pbtree_ || !mmap_) {
+        LOGI("remove: FAIL - not initialized");
+        return false;
+    }
     
     size_t offset = 0;
     {
         std::shared_lock lock(rw_mutex_);
         offset = btree_->find(key);
     }
+    LOGI("remove: found offset=%zu for key=%s", offset, key.c_str());
 
-    if (offset == 0) return false;
+    if (offset == 0) {
+        LOGI("remove: FAIL - offset is 0, key not found");
+        return false;
+    }
 
     // Track live bytes removal for compactor
     const uint8_t* len_ptr = mmap_->get_address(offset);
@@ -1159,9 +1189,21 @@ bool DBEngine::remove(const std::string& key) {
     }
 
     if (sync_enabled_) {
-        // For sync-enabled DBs, we must write a tombstone record to mmap.
-        // insertRecBytes handles its own unique_lock internaly, so we call it without holding rw_mutex_.
-        insertRecBytes(key, {}, true, true);
+        // For sync-enabled DBs, we must write a tombstone record to mmap
+        // and update the B-tree to point to the tombstone offset.
+        LOGI("remove: sync_enabled=true, writing tombstone for key=%s", key.c_str());
+        size_t tombstone_offset = 0;
+        bool insert_ok = insertRecBytes(key, {}, true, true, nullptr, &tombstone_offset);
+        LOGI("remove: insertRecBytes returned ok=%d, tombstone_offset=%zu", insert_ok, tombstone_offset);
+        
+        // Update B-tree to point to tombstone so find() returns it
+        if (tombstone_offset > 0) {
+            std::unique_lock lock(rw_mutex_);
+            btree_->insert(key, tombstone_offset);
+            LOGI("remove: updated btree with tombstone offset");
+        } else {
+            LOGE("remove: FAILED to get tombstone offset!");
+        }
     } else {
         std::unique_lock lock(rw_mutex_);
         // Plain delete: point to offset 0 in the tree and ensure durability.

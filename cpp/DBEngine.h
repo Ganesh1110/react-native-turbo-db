@@ -123,11 +123,13 @@ private:
                                             bool shouldCommit);
 
     // Byte-level insert called from async path (no jsi::Runtime needed)
+    // If outOffset is provided, returns the offset where data was written
     bool insertRecBytes(const std::string& key,
                          const std::vector<uint8_t>& bytes,
                          bool shouldCommit = true,
                          bool is_tombstone = false,
-                         SyncMetadata* explicit_meta = nullptr);
+                         SyncMetadata* explicit_meta = nullptr,
+                         size_t* outOffset = nullptr);
 
     bool repairInternal();
 

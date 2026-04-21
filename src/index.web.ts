@@ -17,12 +17,6 @@ export interface SetOptions {
 
 /**
  * Web Implementation of TurboDB.
- * Features:
- * - SSR Friendly (No-op on server)
- * - IndexedDB Backend for persistence
- * - In-memory cache for synchronous reads
- * - Configurable immediate vs debounced writes
- * - Full API parity with React Native implementation
  */
 export class TurboDB {
   static install(): boolean {
@@ -33,9 +27,6 @@ export class TurboDB {
     return '/';
   }
 
-  /**
-   * ✅ Preferred factory — async, ensures IndexedDB is ready.
-   */
   static async create(
     path: string,
     size: number = 10 * 1024 * 1024,
@@ -52,6 +43,12 @@ export class TurboDB {
   private saveTimeout: any = null;
   private initPromise: Promise<void> | null = null;
 
+  private listeners: Set<
+    (event: { type: 'set' | 'remove'; key: string; value?: any }) => void
+  > = new Set();
+  private keyListeners: Map<string, Set<(value: any) => void>> = new Map();
+  private indexes: Set<string> = new Set();
+
   constructor(
     private path: string,
     _size: number = 10 * 1024 * 1024,
@@ -60,14 +57,12 @@ export class TurboDB {
     if (IS_SERVER) {
       console.log('TurboDB (Web): SSR Mode');
     } else {
-      // Lazy-trigger initialization if not created via factory
       this.initPromise = this.ensureInitialized();
     }
   }
 
   private async ensureInitialized(): Promise<void> {
-    if (IS_SERVER) return;
-    if (this.isInitialized) return;
+    if (IS_SERVER || this.isInitialized) return;
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = new Promise((resolve, reject) => {
@@ -75,11 +70,9 @@ export class TurboDB {
       const request = indexedDB.open(dbName, 1);
 
       request.onerror = () => {
-        const error = new TurboDBError(
-          TurboDBErrorCode.IO_FAIL,
-          'Failed to open IndexedDB'
+        reject(
+          new TurboDBError(TurboDBErrorCode.IO_FAIL, 'Failed to open IndexedDB')
         );
-        reject(error);
       };
 
       request.onupgradeneeded = (event: any) => {
@@ -106,13 +99,11 @@ export class TurboDB {
 
   private async loadFromIndexedDB(): Promise<void> {
     if (!this.db) return;
-
     return new Promise((resolve, reject) => {
       try {
         const transaction = this.db!.transaction(['kv'], 'readonly');
         const store = transaction.objectStore('kv');
         const request = store.openCursor();
-
         request.onsuccess = (event: any) => {
           const cursor = event.target.result;
           if (cursor) {
@@ -122,7 +113,6 @@ export class TurboDB {
             resolve();
           }
         };
-
         request.onerror = () => {
           reject(
             new TurboDBError(
@@ -145,17 +135,14 @@ export class TurboDB {
 
   private async persistToIndexedDB(): Promise<void> {
     if (!this.db || IS_SERVER) return;
-
     return new Promise((resolve, reject) => {
       try {
         const transaction = this.db!.transaction(['kv'], 'readwrite');
         const store = transaction.objectStore('kv');
-
         store.clear();
         for (const [key, value] of this.storage.entries()) {
           store.put(value, key);
         }
-
         transaction.oncomplete = () => resolve();
         transaction.onerror = (event: any) => {
           const error = event.target.error;
@@ -178,23 +165,73 @@ export class TurboDB {
     });
   }
 
-  // --- Synchronous API ---
+  // --- Subscriptions & Notifications ---
+
+  subscribeAll(
+    callback: (event: {
+      type: 'set' | 'remove';
+      key: string;
+      value?: any;
+    }) => void
+  ): () => void {
+    this.listeners.add(callback);
+    return () => this.listeners.delete(callback);
+  }
+
+  subscribe(key: string, callback: (value: any) => void): () => void {
+    if (!this.keyListeners.has(key)) {
+      this.keyListeners.set(key, new Set());
+    }
+    this.keyListeners.get(key)!.add(callback);
+    return () => {
+      const listeners = this.keyListeners.get(key);
+      if (listeners) {
+        listeners.delete(callback);
+        if (listeners.size === 0) {
+          this.keyListeners.delete(key);
+        }
+      }
+    };
+  }
+
+  private notify(type: 'set' | 'remove', key: string, value?: any) {
+    const event = { type, key, value };
+    this.listeners.forEach((cb) => cb(event));
+    const kListeners = this.keyListeners.get(key);
+    if (kListeners) kListeners.forEach((cb) => cb(value));
+  }
+
+  // --- Basic API ---
+
+  async init(): Promise<void> {
+    return this.ensureInitialized();
+  }
 
   has(key: string): boolean {
     return this.storage.has(key);
   }
 
   get<T = any>(key: string): T | undefined {
-    return this.storage.get(key);
+    const val = this.storage.get(key);
+    if (val && typeof val === 'object' && '__ttl_expiry' in val) {
+      if (Date.now() > val.__ttl_expiry) {
+        this.remove(key);
+        return undefined;
+      }
+      return val.data;
+    }
+    return val;
   }
 
-  /**
-   * Synchronously set a value (updates cache immediately, persists in background)
-   */
   set(key: string, value: any, options: SetOptions = {}): boolean {
     if (IS_SERVER) return false;
     this.storage.set(key, value);
-
+    this.indexes.forEach((field) => {
+      if (value && value[field] !== undefined) {
+        this.storage.set(`__idx:${field}:${value[field]}:${key}`, key);
+      }
+    });
+    this.notify('set', key, value);
     if (options.debounce) {
       this.scheduleSave();
     } else {
@@ -203,82 +240,115 @@ export class TurboDB {
     return true;
   }
 
+  setWithTTL(
+    key: string,
+    value: any,
+    ttlMs: number,
+    options: SetOptions = {}
+  ): boolean {
+    return this.set(
+      key,
+      { data: value, __ttl_expiry: Date.now() + ttlMs },
+      options
+    );
+  }
+
   remove(key: string): boolean {
     if (IS_SERVER) return false;
     const res = this.storage.delete(key);
-    this.scheduleSave();
+    if (res) {
+      this.notify('remove', key);
+      this.scheduleSave();
+    }
     return res;
   }
 
   clear(): boolean {
     if (IS_SERVER) return false;
     this.storage.clear();
+    this.notify('remove', '*');
     this.scheduleSave();
     return true;
+  }
+
+  length(): number {
+    return this.storage.size;
   }
 
   getAllKeys(): string[] {
     return Array.from(this.storage.keys());
   }
 
-  getAllKeysPaged(limit: number, offset: number): string[] {
-    const keys = Array.from(this.storage.keys());
-    return keys.slice(offset, offset + limit);
+  // --- Medium & Advanced API ---
+
+  async createIndex(field: string): Promise<void> {
+    this.indexes.add(field);
+    for (const [key, val] of this.storage.entries()) {
+      if (val && val[field] !== undefined) {
+        this.storage.set(`__idx:${field}:${val[field]}:${key}`, key);
+      }
+    }
   }
 
-  // --- Asynchronous API (Parity with Native) ---
+  async queryByIndex(field: string, value: any): Promise<any[]> {
+    const prefix = `__idx:${field}:${value}:`;
+    const indexResults = this.getByPrefix(prefix);
+    const results = [];
+    for (const idx of indexResults) {
+      const data = this.storage.get(idx.value);
+      if (data) results.push(data);
+    }
+    return results;
+  }
 
-  async setAsync(
+  async *streamKeys(): AsyncGenerator<string> {
+    await this.ensureInitialized();
+    for (const key of this.storage.keys()) {
+      if (!key.startsWith('__idx:')) yield key;
+    }
+  }
+
+  merge(
     key: string,
-    value: any,
+    partial: Record<string, any>,
     options: SetOptions = {}
-  ): Promise<boolean> {
-    await this.ensureInitialized();
-    this.storage.set(key, value);
-    if (options.debounce) {
-      this.scheduleSave();
-      return true;
-    }
-    await this.persistToIndexedDB();
-    return true;
+  ): boolean {
+    const current = this.get(key) || {};
+    return this.set(key, { ...current, ...partial }, options);
   }
 
-  async getAsync<T = any>(key: string): Promise<T | undefined> {
-    await this.ensureInitialized();
-    return this.storage.get(key);
-  }
-
-  async setMultiAsync(
-    entries: Record<string, any>,
-    options: SetOptions = {}
-  ): Promise<boolean> {
-    if (IS_SERVER) return false;
-    await this.ensureInitialized();
-    for (const [key, value] of Object.entries(entries)) {
-      this.storage.set(key, value);
-    }
-    if (options.debounce) {
-      this.scheduleSave();
-      return true;
-    }
-    await this.persistToIndexedDB();
-    return true;
-  }
-
-  async getMultipleAsync(keys: string[]): Promise<Record<string, any>> {
-    await this.ensureInitialized();
-    const result: Record<string, any> = {};
+  removeMultiple(keys: string[]): boolean {
+    let allSuccess = true;
     for (const key of keys) {
-      result[key] = this.storage.get(key);
+      if (!this.remove(key)) allSuccess = false;
     }
-    return result;
+    return allSuccess;
   }
 
-  async rangeQueryAsync(
-    startKey: string,
-    endKey: string
-  ): Promise<RangeQueryResult[]> {
-    await this.ensureInitialized();
+  getOrDefault<T = any>(key: string, defaultValue: T): T {
+    const val = this.get<T>(key);
+    return val !== undefined ? val : defaultValue;
+  }
+
+  setIfNotExists(key: string, value: any, options: SetOptions = {}): boolean {
+    if (this.has(key)) return false;
+    return this.set(key, value, options);
+  }
+
+  compareAndSet(
+    key: string,
+    expected: any,
+    next: any,
+    options: SetOptions = {}
+  ): boolean {
+    const current = this.get(key);
+    if (JSON.stringify(current) === JSON.stringify(expected)) {
+      return this.set(key, next, options);
+    }
+    return false;
+  }
+
+  rangeQuery(startKey: string, endKey: string): RangeQueryResult[] {
     const results: RangeQueryResult[] = [];
     const keys = Array.from(this.storage.keys()).sort();
     for (const key of keys) {
@@ -289,23 +359,194 @@ export class TurboDB {
     return results;
   }
 
-  async getAllKeysAsync(): Promise<string[]> {
+  getByPrefix(prefix: string): RangeQueryResult[] {
+    return this.rangeQuery(prefix, prefix + '\uffff');
+  }
+
+  // --- Asynchronous API ---
+
+  async setAsync(
+    key: string,
+    value: any,
+    options: SetOptions = {}
+  ): Promise<boolean> {
     await this.ensureInitialized();
-    return Array.from(this.storage.keys());
+    return this.set(key, value, options);
+  }
+
+  async getAsync<T = any>(key: string): Promise<T | undefined> {
+    await this.ensureInitialized();
+    return this.get<T>(key);
   }
 
   async removeAsync(key: string): Promise<boolean> {
     await this.ensureInitialized();
-    const res = this.storage.delete(key);
-    await this.persistToIndexedDB();
-    return res;
+    return this.remove(key);
+  }
+
+  async setMultiAsync(
+    entries: Record<string, any>,
+    options: SetOptions = {}
+  ): Promise<boolean> {
+    await this.ensureInitialized();
+    for (const [key, value] of Object.entries(entries)) {
+      this.set(key, value, options);
+    }
+    return true;
+  }
+
+  async getMultipleAsync(keys: string[]): Promise<Record<string, any>> {
+    await this.ensureInitialized();
+    const result: Record<string, any> = {};
+    for (const key of keys) {
+      result[key] = this.get(key);
+    }
+    return result;
+  }
+
+  async rangeQueryAsync(
+    startKey: string,
+    endKey: string
+  ): Promise<RangeQueryResult[]> {
+    await this.ensureInitialized();
+    return this.rangeQuery(startKey, endKey);
+  }
+
+  async getByPrefixAsync(prefix: string): Promise<RangeQueryResult[]> {
+    return this.rangeQueryAsync(prefix, prefix + '\uffff');
+  }
+
+  async query(options: {
+    prefix?: string;
+    filter?: (value: any) => boolean;
+    sort?: (a: any, b: any) => number;
+    limit?: number;
+  }): Promise<any[]> {
+    let results: RangeQueryResult[] = [];
+    if (options.prefix) {
+      results = await this.getByPrefixAsync(options.prefix);
+    } else {
+      results = Array.from(this.storage.entries()).map(([key, value]) => ({
+        key,
+        value,
+      }));
+    }
+    let items = results.map((r) => r.value);
+    if (options.filter) items = items.filter(options.filter);
+    if (options.sort) items = items.sort(options.sort);
+    if (options.limit) items = items.slice(0, options.limit);
+    return items;
+  }
+
+  async transaction(fn: (db: TurboDB) => Promise<void> | void): Promise<void> {
+    await fn(this);
+    await this.flush();
+  }
+
+  async getAllKeysAsync(): Promise<string[]> {
+    await this.ensureInitialized();
+    return this.getAllKeys();
+  }
+
+  async lengthAsync(): Promise<number> {
+    await this.ensureInitialized();
+    return this.length();
+  }
+
+  async mergeAsync(
+    key: string,
+    partial: Record<string, any>,
+    options: SetOptions = {}
+  ): Promise<boolean> {
+    await this.ensureInitialized();
+    return this.merge(key, partial, options);
+  }
+
+  async removeMultipleAsync(keys: string[]): Promise<boolean> {
+    await this.ensureInitialized();
+    return this.removeMultiple(keys);
   }
 
   async deleteAllAsync(): Promise<boolean> {
     await this.ensureInitialized();
-    this.storage.clear();
+    return this.clear();
+  }
+
+  async migrate(
+    fromVersion: number,
+    toVersion: number,
+    migrationFn: (db: TurboDB) => Promise<void>
+  ): Promise<void> {
+    const currentVersionKey = '__sys_db_version';
+    const currentVersion =
+      (await this.getAsync<number>(currentVersionKey)) || 0;
+    if (currentVersion >= fromVersion && currentVersion < toVersion) {
+      await migrationFn(this);
+      await this.setAsync(currentVersionKey, toVersion);
+    }
+  }
+
+  async enqueueMutation(mutation: {
+    type: 'set' | 'remove' | 'merge';
+    key: string;
+    value?: any;
+  }): Promise<void> {
+    const queueKey = '__sys_mutation_queue';
+    const queue = (await this.getAsync<any[]>(queueKey)) || [];
+    queue.push({
+      ...mutation,
+      id: Date.now() + Math.random(),
+      timestamp: Date.now(),
+    });
+    await this.setAsync(queueKey, queue);
+  }
+
+  async flushQueue(): Promise<void> {
+    const queueKey = '__sys_mutation_queue';
+    const queue = await this.getAsync<any[]>(queueKey);
+    if (!queue || queue.length === 0) return;
+    for (const op of queue) {
+      if (op.type === 'set') await this.setAsync(op.key, op.value);
+      else if (op.type === 'remove') await this.removeAsync(op.key);
+      else if (op.type === 'merge') await this.mergeAsync(op.key, op.value);
+    }
+    await this.setAsync(queueKey, []);
+  }
+
+  async compact(): Promise<boolean> {
     await this.persistToIndexedDB();
     return true;
+  }
+
+  async export(): Promise<Record<string, any>> {
+    await this.ensureInitialized();
+    const res: Record<string, any> = {};
+    for (const [k, v] of this.storage.entries()) {
+      if (!k.startsWith('__')) res[k] = v;
+    }
+    return res;
+  }
+
+  async import(data: Record<string, any>): Promise<void> {
+    await this.setMultiAsync(data);
+  }
+
+  getMetrics(): any {
+    return {
+      type: 'web',
+      size: this.storage.size,
+      initialized: this.isInitialized,
+    };
+  }
+
+  use(plugin: { name: string; onSet?: (k: string, v: any) => void }): void {
+    if (plugin.onSet) {
+      this.subscribeAll((event) => {
+        if (event.type === 'set' && plugin.onSet) {
+          plugin.onSet(event.key, event.value);
+        }
+      });
+    }
   }
 
   async flush(): Promise<void> {
@@ -329,7 +570,7 @@ export class TurboDB {
     return true;
   }
 
-  // --- Legacy Compatibility ---
+  // --- Legacy Compatibility & Aliases ---
   async del(key: string): Promise<boolean> {
     return this.removeAsync(key);
   }
@@ -344,13 +585,6 @@ export class TurboDB {
 
   async getMultiple(keys: string[]): Promise<Record<string, any>> {
     return this.getMultipleAsync(keys);
-  }
-
-  async rangeQuery(
-    startKey: string,
-    endKey: string
-  ): Promise<RangeQueryResult[]> {
-    return this.rangeQueryAsync(startKey, endKey);
   }
 
   benchmark(): number {

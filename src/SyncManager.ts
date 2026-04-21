@@ -37,7 +37,10 @@ export type SyncEvent =
   | 'pull_success'
   | 'push_success'
   | 'error'
-  | 'stopped';
+  | 'stopped'
+  | 'paused'
+  | 'resumed'
+  | 'network_status_change';
 
 /**
  * Orchestrates Offline-First Synchronization for TurboDB.
@@ -47,6 +50,8 @@ export class SyncManager {
   private db: TurboDB;
   private adapter: SyncAdapter;
   private isSyncing = false;
+  private isPaused = false;
+  private isOnline = true;
   private syncTimer: any | null = null;
   private options: SyncOptions;
 
@@ -54,7 +59,7 @@ export class SyncManager {
   private readonly CURSOR_KEY = '__sys_sync_cursor';
   private lastRemoteVersion: number = 0;
 
-  private listeners: Set<(event: SyncEvent, error?: Error) => void> = new Set();
+  private listeners: Set<(event: SyncEvent, data?: any) => void> = new Set();
 
   constructor(db: TurboDB, adapter: SyncAdapter, options: SyncOptions = {}) {
     this.db = db;
@@ -70,7 +75,6 @@ export class SyncManager {
    * Start the background sync loop.
    */
   async start(): Promise<void> {
-    // Load last sync state
     try {
       const state = await this.db.getAsync(this.CURSOR_KEY);
       if (state && typeof state.lastRemoteVersion === 'number') {
@@ -80,7 +84,7 @@ export class SyncManager {
       // Ignored: first time
     }
 
-    if (this.options.autoSync) {
+    if (this.options.autoSync && !this.isPaused) {
       this.scheduleNextSync();
     }
   }
@@ -96,11 +100,36 @@ export class SyncManager {
     this.notify('stopped');
   }
 
+  pause(): void {
+    this.isPaused = true;
+    if (this.syncTimer) clearTimeout(this.syncTimer);
+    this.notify('paused');
+  }
+
+  resume(): void {
+    this.isPaused = false;
+    this.notify('resumed');
+    if (this.options.autoSync) {
+      this.forceSync();
+    }
+  }
+
+  setNetworkStatus(online: boolean): void {
+    const changed = this.isOnline !== online;
+    this.isOnline = online;
+    if (changed) {
+      this.notify('network_status_change', { online });
+      if (online && this.options.autoSync && !this.isPaused) {
+        this.forceSync();
+      }
+    }
+  }
+
   /**
    * Manually trigger a full pull + push sync cycle.
    */
   async forceSync(): Promise<void> {
-    if (this.isSyncing) return;
+    if (this.isSyncing || this.isPaused || !this.isOnline) return;
     this.isSyncing = true;
     this.notify('started');
 
@@ -108,53 +137,50 @@ export class SyncManager {
       // ── Step 1: Pull Remote Changes ──
       const pullResult = await this.adapter.pullChanges(this.lastRemoteVersion);
       if (pullResult.changes.length > 0) {
-        // Apply remote changes utilizing C++ LWW conflict resolver
         await this.db.applyRemoteChangesAsync(pullResult.changes);
-
         this.lastRemoteVersion = pullResult.latest_remote_version;
         await this.db.setAsync(this.CURSOR_KEY, {
           lastRemoteVersion: this.lastRemoteVersion,
         });
       }
-      this.notify('pull_success');
+      this.notify('pull_success', { count: pullResult.changes.length });
 
       // ── Step 2: Push Local Changes ──
-      const localChanges: SyncChanges = await this.db.getLocalChangesAsync(0); // Fetch all dirty
-
+      const localChanges: SyncChanges = await this.db.getLocalChangesAsync(0);
       if (localChanges.changes.length > 0) {
         const acks = await this.adapter.pushChanges(localChanges.changes);
-
-        // Mark as pushed to clear dirty flag and bump remote_version
         await this.db.markPushedAsync(acks);
       }
-      this.notify('push_success');
+      this.notify('push_success', { count: localChanges.changes.length });
     } catch (error: any) {
       this.notify('error', error);
     } finally {
       this.isSyncing = false;
-      if (this.options.autoSync) {
+      if (this.options.autoSync && !this.isPaused) {
         this.scheduleNextSync();
       }
     }
   }
 
-  onSyncEvent(callback: (event: SyncEvent, error?: Error) => void): () => void {
+  onSyncEvent(callback: (event: SyncEvent, data?: any) => void): () => void {
     this.listeners.add(callback);
     return () => this.listeners.delete(callback);
   }
 
-  private notify(event: SyncEvent, error?: Error) {
+  private notify(event: SyncEvent, data?: any) {
     for (const listener of this.listeners) {
       try {
-        listener(event, error);
+        listener(event, data);
       } catch (e) {
-        console.error('SyncEvent listener threw an error:', e);
+        console.error('SyncEvent listener error:', e);
       }
     }
   }
 
   private scheduleNextSync() {
     if (this.syncTimer) clearTimeout(this.syncTimer);
+    if (this.isPaused || !this.isOnline) return;
+
     this.syncTimer = setTimeout(() => {
       this.forceSync();
     }, this.options.syncIntervalMs);

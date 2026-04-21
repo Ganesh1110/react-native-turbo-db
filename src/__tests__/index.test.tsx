@@ -1,5 +1,83 @@
 import { TurboDB } from '../index';
 
+jest.mock('react-native', () => ({
+  TurboModuleRegistry: {
+    get: jest.fn(() => ({
+      install: jest.fn(() => true),
+      getDocumentsDirectory: jest.fn(() => '/tmp'),
+    })),
+    getEnforcing: jest.fn(() => ({
+      install: jest.fn(() => true),
+      getDocumentsDirectory: jest.fn(() => '/tmp'),
+    })),
+  },
+  NativeModules: {
+    TurboDB: {
+      install: jest.fn(() => true),
+      getDocumentsDirectory: jest.fn(() => '/tmp'),
+    },
+  },
+}));
+
+const storage = new Map<string, any>();
+
+(global as any).NativeDB = {
+  initStorage: jest.fn(() => true),
+  insertRec: jest.fn((key: string, value: any) => {
+    storage.set(key, value);
+    return true;
+  }),
+  findRec: jest.fn((key: string) => {
+    return storage.get(key);
+  }),
+  remove: jest.fn((key: string) => {
+    if (storage.has(key)) {
+      storage.delete(key);
+      return true;
+    }
+    return false;
+  }),
+  del: jest.fn((key: string) => {
+    if (storage.has(key)) {
+      storage.delete(key);
+      return true;
+    }
+    return false;
+  }),
+  clearStorage: jest.fn(() => {
+    storage.clear();
+    return true;
+  }),
+  deleteAll: jest.fn(() => {
+    storage.clear();
+    return true;
+  }),
+  setMulti: jest.fn((entries: Record<string, any>) => {
+    Object.keys(entries).forEach((key) => storage.set(key, entries[key]));
+    return true;
+  }),
+  getAllKeys: jest.fn(() => Array.from(storage.keys())),
+  setAsync: jest.fn(async (args: { key: string; value: any }) => {
+    storage.set(args.key, args.value);
+    return true;
+  }),
+  getAsync: jest.fn(async (key: string) => {
+    return storage.get(key);
+  }),
+  removeAsync: jest.fn(async (key: string) => {
+    if (storage.has(key)) {
+      storage.delete(key);
+      return true;
+    }
+    return false;
+  }),
+  setMultiAsync: jest.fn(async (entries: Record<string, any>) => {
+    Object.keys(entries).forEach((key) => storage.set(key, entries[key]));
+    return true;
+  }),
+  getAllKeysAsync: jest.fn(async () => Array.from(storage.keys())),
+};
+
 describe('TurboDB Integration Tests', () => {
   let db: TurboDB;
   const DB_PATH = 'test_db';
