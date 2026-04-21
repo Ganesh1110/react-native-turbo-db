@@ -121,8 +121,8 @@ bool WALManager::sync() {
     int fd = ::open(wal_path_.c_str(), O_RDONLY);
     if (fd >= 0) {
         ::fsync(fd);
-        ::close(fd);̊
-      
+        ::close(fd);
+
     }
 #endif
     return true;

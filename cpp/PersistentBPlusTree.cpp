@@ -76,8 +76,11 @@ void PersistentBPlusTree::init() {
         header_.checksum = calculate_crc32(
             reinterpret_cast<const uint8_t*>(&header_), sizeof(TreeHeader));
         std::string encoded(reinterpret_cast<const char*>(&header_), sizeof(TreeHeader));
-        if (wal_) wal_->logPageWrite(0, encoded);
-        else {
+        if (wal_) {
+            wal_->logPageWrite(0, encoded);
+            wal_->logCommit();
+            wal_->sync();
+        } else {
             mmap_->write(0, encoded);
             mmap_->sync(0, sizeof(TreeHeader));
         }
@@ -105,10 +108,11 @@ void PersistentBPlusTree::checkpoint() {
 
     if (wal_) {
         wal_->logPageWrite(0, encoded);
-    } else {
-        mmap_->write(0, encoded);
-        mmap_->sync(0, sizeof(TreeHeader));
     }
+    
+    // Always write to mmap for immediate visibility on next boot
+    mmap_->write(0, encoded);
+    mmap_->sync(0, sizeof(TreeHeader));
 }
 
 uint64_t PersistentBPlusTree::allocate_node(bool is_leaf) {

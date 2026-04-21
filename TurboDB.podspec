@@ -19,15 +19,16 @@ Pod::Spec.new do |s|
   # Exclude generated codegen files and dead ThreadPool (replaced by DBScheduler)
   s.exclude_files = "ios/generated/**/*", "cpp/ThreadPool.cpp"
 
-  s.dependency 'libsodium'
+  # No libsodium dependency - using stub impl until VFS issue resolved
+  # s.dependency 'libsodium'
 
   # Folly config defines — FOLLY_HAS_COROUTINES=0 prevents 'folly/coro/Coroutine.h' not found
   # error on Xcode 26 Beta where the SDK does not ship that header yet.
   # std=c++20 required by DBScheduler (priority_queue comparator) and WALManager 2-pass recovery.
   s.pod_target_xcconfig = {
-    "OTHER_CPLUSPLUSFLAGS" => "-DFOLLY_NO_CONFIG -DFOLLY_MOBILE=1 -DFOLLY_USE_LIBCPP=1 -DFOLLY_HAS_COROUTINES=0 -DSODIUM_STATIC=1 -std=c++20",
+    "OTHER_CPLUSPLUSFLAGS" => "-DFOLLY_NO_CONFIG -DFOLLY_MOBILE=1 -DFOLLY_USE_LIBCPP=1 -DFOLLY_HAS_COROUTINES=0 -std=c++20",
     "CLANG_CXX_LANGUAGE_STANDARD" => "c++20",
-    "HEADER_SEARCH_PATHS" => "\"$(PODS_TARGET_SRCROOT)/cpp\" \"$(PODS_ROOT)/libsodium/src/libsodium/include/sodium\""
+    "HEADER_SEARCH_PATHS" => "\"$(PODS_TARGET_SRCROOT)/cpp\""
   }
 
   install_modules_dependencies(s)

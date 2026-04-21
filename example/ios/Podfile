@@ -1,4 +1,4 @@
-ENV['RCT_USE_RN_DEP'] = '1'
+ENV['RCT_USE_RN_DEP'] = '0'
 ENV['RCT_NEW_ARCH_ENABLED'] = '1'
 
 # Resolve react_native_pods.rb with node to allow for hoisting
@@ -81,17 +81,27 @@ target 'TurboDBExample' do
         end
 
         if target.name == 'libsodium'
-          # Add alignment flags and ignore alignment errors
           ['OTHER_CFLAGS', 'OTHER_CPLUSPLUSFLAGS'].each do |key|
-            flags = config.build_settings[key] || '$(inherited)'
+            flags = config.build_settings[key]
+            flags = flags.is_a?(Array) ? flags.join(' ') : (flags || '$(inherited)')
             unless flags.include?('-DLS_ALIGNED_ONLY')
               config.build_settings[key] = "#{flags} -DLS_ALIGNED_ONLY -DLS_STRICT_ALIGNMENT -Wno-error=invalid-alignment"
             end
           end
+          config.build_settings['HEADER_SEARCH_PATHS'] = "\"$(PODS_ROOT)/libsodium/src/libsodium/include\" \"$(PODS_ROOT)/libsodium/src/libsodium/include/sodium\" /usr/include $(inherited)"
         end
-        flags = config.build_settings['OTHER_CPLUSPLUSFLAGS'] || '$(inherited)'
+        flags = config.build_settings['OTHER_CPLUSPLUSFLAGS']
+        flags = flags.is_a?(Array) ? flags.join(' ') : (flags || '$(inherited)')
         unless flags.include?('FOLLY_CFG_NO_COROUTINES')
           config.build_settings['OTHER_CPLUSPLUSFLAGS'] = "#{flags} -DFOLLY_CFG_NO_COROUTINES"
+        end
+        ['OTHER_CFLAGS', 'OTHER_CPLUSPLUSFLAGS', 'OTHER_SWIFT_FLAGS'].each do |key|
+          flags = config.build_settings[key]
+          next if flags.nil?
+          flags = flags.is_a?(Array) ? flags.join(' ') : flags
+          flags = flags.gsub(/-Xcc\s+-ivfsoverlay\s+-Xcc\s+"[^"]*React-VFS\.yaml"/, '')
+          flags = flags.gsub(/-ivfsoverlay\s+"[^"]*React-VFS\.yaml"/, '')
+          config.build_settings[key] = flags
         end
       end
     end
@@ -117,18 +127,30 @@ target 'TurboDBExample' do
       xcconfig_path = "Pods/Target Support Files/libsodium/libsodium.#{config}.xcconfig"
       if File.exist?(xcconfig_path)
         content = File.read(xcconfig_path)
-        new_content = content.gsub(/-ivfsoverlay\s+\"[^\"]*React-VFS\.yaml\"/, '')
-                             .gsub(/-ivfsoverlay\s+[^\s]*React-VFS\.yaml/, '')
-        
-        # Add alignment flags and ignore alignment errors
-        unless new_content.include?('-DLS_ALIGNED_ONLY')
-          if new_content =~ /OTHER_CFLAGS = \$\(inherited\)/
-            new_content = new_content.gsub(/OTHER_CFLAGS = \$\(inherited\)/, 'OTHER_CFLAGS = $(inherited) -DLS_ALIGNED_ONLY -DLS_STRICT_ALIGNMENT -Wno-error=invalid-alignment -Wno-invalid-alignment')
-          else
-            new_content << "\nOTHER_CFLAGS = $(inherited) -DLS_ALIGNED_ONLY -DLS_STRICT_ALIGNMENT -Wno-error=invalid-alignment -Wno-invalid-alignment"
-          end
+        content = content.gsub(/-Xcc\s+-ivfsoverlay\s+-Xcc\s+"[^"]*React-VFS\.yaml"/, '')
+        content = content.gsub(/-ivfsoverlay\s+"[^"]*React-VFS\.yaml"/, '')
+        content = content.gsub(/\s+-Xcc\s+-ivfsoverlay\s+-Xcc\s+"[^"]*React-VFS\.yaml"/, '')
+
+        if content.include?('-DLS_ALIGNED_ONLY')
+        elsif content =~ /OTHER_CFLAGS = \$\(inherited\)/
+          content = content.gsub(/OTHER_CFLAGS = \$\(inherited\)/, 'OTHER_CFLAGS = $(inherited) -DLS_ALIGNED_ONLY -DLS_STRICT_ALIGNMENT -Wno-error=invalid-alignment -Wno-invalid-alignment')
+        else
+          content << "\nOTHER_CFLAGS = $(inherited) -DLS_ALIGNED_ONLY -DLS_STRICT_ALIGNMENT -Wno-error=invalid-alignment -Wno-invalid-alignment"
         end
-        
+
+        new_content = content
+
+        # Fix header paths - ensure space between include and (inherited)
+        if new_content.include?('HEADER_SEARCH_PATHS')
+          new_content = new_content.gsub(
+            /HEADER_SEARCH_PATHS = "[^"]*libsodium\/include\$\(inherited\)/,
+            'HEADER_SEARCH_PATHS = "$(PODS_ROOT)/libsodium/src/libsodium/include" $(inherited)'
+          )
+        end
+
+        # Remove VFS from OTHER_SWIFT_FLAGS
+        new_content = new_content.gsub(/OTHER_SWIFT_FLAGS = .*$/, 'OTHER_SWIFT_FLAGS = $(inherited)')
+
         File.write(xcconfig_path, new_content)
       end
     end

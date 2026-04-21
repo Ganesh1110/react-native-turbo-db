@@ -28,10 +28,11 @@ DBEngine::DBEngine(
     std::unique_ptr<SecureCryptoContext> crypto)
     : start_time_(std::chrono::high_resolution_clock::now()),
       crypto_(std::move(crypto)),
+      scheduler_(std::make_unique<DBScheduler>()),
       next_free_offset_(1024 * 1024),
       arena_(1024 * 1024),
       js_invoker_(std::move(js_invoker)),
-      scheduler_(std::make_unique<DBScheduler>())
+      oplog_btree_(nullptr)
 {
 }
 
@@ -475,12 +476,13 @@ void DBEngine::initializeLogicalClock() {
     // But since `BufferedBTree` is memory-cached, taking a fast peek is okay.
     
     uint64_t max_clk = 1;
-    // We will do a robust but simple enumeration:
-    auto all_keys = oplog_btree_->getAllKeys();
-    for (const auto& k : all_keys) {
-        size_t underscore_pos = k.find('_');
-        if (underscore_pos != std::string::npos) {
-            std::string num_part = k.substr(0, underscore_pos);
+    // Scan only keys with __oplog: prefix
+    auto all_keys = oplog_btree_->range("__oplog:", "__oplog:~~~~~~~~~~~~~~~~");
+    for (const auto& pair : all_keys) {
+        const std::string& k = pair.first;
+        size_t prefix_pos = k.find("__oplog:");
+        if (prefix_pos != std::string::npos) {
+            std::string num_part = k.substr(prefix_pos + 8, 20);
             try {
                 uint64_t clk = std::stoull(num_part);
                 if (clk > max_clk) max_clk = clk;
@@ -494,13 +496,11 @@ void DBEngine::initializeLogicalClock() {
 void DBEngine::writeOpLog(uint64_t clock, const std::string& key) {
     if (!sync_enabled_ || !oplog_btree_) return;
     
-    // Format: 20-digit zero-padded clock + '_' + key
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%020llu_", (unsigned long long)clock);
+    // Format: __oplog: + 20-digit zero-padded clock + '_' + key
+    char buf[64];
+    snprintf(buf, sizeof(buf), "__oplog:%020llu_", (unsigned long long)clock);
     std::string oplog_key = std::string(buf) + key;
     
-    // We just need a dummy offset for the value, as the key contains the actual data we need.
-    // Alternatively, we could store the actual offset. We'll store 1.
     oplog_btree_->insert(oplog_key, 1);
 }
 
@@ -544,8 +544,12 @@ bool DBEngine::initStorage(const std::string& path, size_t size, bool enableSync
         }
 
         // WAL recovery (commit-aware, 2-pass)
-        if (is_secure_mode_) {
-            wal_->recoverSafe(mmap_.get());
+        if (is_secure_mode_ && wal_) {
+            bool replayed = wal_->recoverSafe(mmap_.get());
+            if (replayed && pbtree_) {
+                // Re-read header after WAL replay to pick up replayed root/offsets
+                pbtree_->init();
+            }
         }
 
         next_free_offset_ = pbtree_->getHeader().next_free_offset;
@@ -557,18 +561,9 @@ bool DBEngine::initStorage(const std::string& path, size_t size, bool enableSync
         compactor_ = std::make_unique<Compactor>(path, crypto_.get());
 
         if (sync_enabled_) {
-            std::string oplog_path = path + ".oplog";
-            oplog_pbtree_ = std::make_unique<PersistentBPlusTree>(mmap_.get(), nullptr);
-            
-            // We use a separate config for oplog if needed, or share the format.
-            // OpLog tree lives in a separate mmap file to not clutter the main BTree.
-            // Actually, we should map it to its own MMapRegion to keep it clean.
-            // For now, assume PersistentBPlusTree relies on MMapRegion. 
-            // Wait, we can't share MMapRegion directly for a second tree without collisions.
-            // The cleanest way: A dedicated oplog MMapRegion. But we don't have an `oplog_mmap_`.
-            // Let's store oplog keys directly in the SAME tree, prefixed with "__oplog:".
-            // That guarantees atomicity. So we don't need `oplog_pbtree_`!
-            // We can just use the main `btree_`.
+            // We store oplog keys directly in the SAME tree, prefixed with "__oplog:".
+            // That guarantees atomicity and avoids file corruption from multiple trees.
+            oplog_btree_ = btree_.get();
             LOGI("initStorage: Sync enabled, using __oplog: prefix in main tree.");
             initializeLogicalClock();
         }
@@ -825,9 +820,13 @@ facebook::jsi::Value DBEngine::insertRecInternal(
 
         next_free_offset_ += sizeof(uint32_t) + len32 +
                              (is_secure_mode_ ? sizeof(uint32_t) : 0);
-        if (pbtree_) pbtree_->setNextFreeOffset(next_free_offset_);
+        if (pbtree_) {
+            pbtree_->setNextFreeOffset(next_free_offset_);
+            pbtree_->checkpoint(); // Persist header change immediately
+        }
 
         btree_->insert(key, offset);
+        btree_->flush(); // Force synchronous flush for immediate durability
 
         if (shouldCommit && is_secure_mode_ && wal_) {
             wal_->logCommit();
@@ -934,9 +933,13 @@ bool DBEngine::insertRecBytes(
 
         next_free_offset_ += sizeof(uint32_t) + len32 +
                              (is_secure_mode_ ? sizeof(uint32_t) : 0);
-        if (pbtree_) pbtree_->setNextFreeOffset(next_free_offset_);
+        if (pbtree_) {
+            pbtree_->setNextFreeOffset(next_free_offset_);
+            pbtree_->checkpoint(); // Persist header change immediately
+        }
 
         btree_->insert(key, offset);
+        btree_->flush(); // Force synchronous flush for immediate durability
 
         if (shouldCommit && is_secure_mode_ && wal_) {
             wal_->logCommit();
@@ -1094,7 +1097,12 @@ facebook::jsi::Value DBEngine::setMulti(
             btree_->insert(key, offset);
         }
 
-        if (pbtree_) pbtree_->setNextFreeOffset(next_free_offset_);
+        if (pbtree_) {
+            pbtree_->setNextFreeOffset(next_free_offset_);
+            pbtree_->checkpoint();
+        }
+        btree_->flush();
+
         if (is_secure_mode_ && wal_) {
             wal_->logCommit();
             wal_->sync();
@@ -1712,275 +1720,32 @@ facebook::jsi::Value DBEngine::getLocalChangesAsync(
     facebook::jsi::Runtime& runtime,
     const facebook::jsi::Value& args)
 {
-    uint64_t lastSyncClock = 0;
-    if (args.isNumber()) lastSyncClock = static_cast<uint64_t>(args.asNumber());
-
-    return createPromise(runtime,
-        [this, lastSyncClock](
-            std::shared_ptr<facebook::jsi::Function> resolve,
-            std::shared_ptr<facebook::jsi::Function> reject)
-        {
-            scheduler_->schedule([this, lastSyncClock, resolve, reject] {
-                struct ChangeItem {
-                    std::string key;
-                    std::vector<uint8_t> raw_payload;
-                    SyncMetadata meta;
-                };
-                std::vector<ChangeItem> changes;
-                uint64_t latest_clock = lastSyncClock;
-
-                try {
-                    std::shared_lock lock(rw_mutex_);
-                    if (!sync_enabled_ || !oplog_pbtree_) {
-                        throw std::runtime_error("Sync not enabled for this database");
-                    }
-
-                    // Scan from clock + 1 to max
-                    char start_buf[32];
-                    snprintf(start_buf, sizeof(start_buf), "%020llu_", (unsigned long long)lastSyncClock + 1);
-                    auto oplog_entries = oplog_pbtree_->range(start_buf, "99999999999999999999_");
-
-                    for (auto& entry : oplog_entries) {
-                        // entry.first is "clock_entityKey", we need the entityKey
-                        size_t underscore_pos = entry.first.find('_');
-                        if (underscore_pos == std::string::npos) continue;
-                        
-                        std::string entityKey = entry.first.substr(underscore_pos + 1);
-                        uint64_t clock = std::stoull(entry.first.substr(0, underscore_pos));
-                        if (clock > latest_clock) latest_clock = clock;
-
-                        // Fetch actual record
-                        size_t offset = btree_->find(entityKey);
-                        if (offset == 0) continue;
-
-                        const uint8_t* len_ptr = mmap_->get_address(offset);
-                        if (!len_ptr) continue;
-
-                        uint32_t total_len;
-                        std::memcpy(&total_len, len_ptr, sizeof(uint32_t));
-
-                        const uint8_t* raw_ptr = mmap_->get_address(offset + sizeof(uint32_t));
-                        if (!raw_ptr || total_len < sizeof(SyncMetadata)) continue;
-
-                        SyncMetadata meta;
-                        std::memcpy(&meta, raw_ptr, sizeof(SyncMetadata));
-
-                        // Only return if it's actually dirty (unless we want to return all history)
-                        if (!(meta.flags & SYNC_FLAG_DIRTY)) continue;
-
-                        std::vector<uint8_t> payload(raw_ptr + sizeof(SyncMetadata), 
-                                                    raw_ptr + total_len);
-                        
-                        // Decrypt if needed
-                        if (crypto_) {
-                            payload = crypto_->decryptAtOffset(payload.data(), payload.size(), 
-                                                              offset + sizeof(uint32_t) + sizeof(SyncMetadata));
-                        }
-
-                        changes.push_back({entityKey, std::move(payload), meta});
-                    }
-                } catch (const std::exception& e) {
-                    js_invoker_->invokeAsync([reject, msg = std::string(e.what())] {
-                        reject->call(*reject, msg.c_str());
-                    });
-                    return;
-                }
-
-                js_invoker_->invokeAsync([this, resolve, changes = std::move(changes), latest_clock] {
-                    // We need a runtime here to build the result. 
-                    // createPromise's internal resolution logic will provide it.
-                    // Actually, we capture resolve/reject which are functions bound to a runtime.
-                    
-                    // Note: This pattern assumes the runtime is still alive.
-                    // In a production app, resolve/reject being functions keeps the runtime alive.
-                    facebook::jsi::Runtime& rt = resolve->getRuntime();
-                    
-                    facebook::jsi::Object res(rt);
-                    res.setProperty(rt, "latest_clock", (double)latest_clock);
-                    
-                    facebook::jsi::Array jsi_changes(rt, changes.size());
-                    for (size_t i = 0; i < changes.size(); ++i) {
-                        facebook::jsi::Object item(rt);
-                        item.setProperty(rt, "key", changes[i].key);
-                        
-                        auto des = BinarySerializer::deserialize(rt, changes[i].raw_payload.data(), changes[i].raw_payload.size());
-                        item.setProperty(rt, "data", std::move(des.first));
-                        
-                        item.setProperty(rt, "logical_clock", (double)changes[i].meta.logical_clock);
-                        item.setProperty(rt, "remote_version", (double)changes[i].meta.remote_version);
-                        item.setProperty(rt, "updated_at", (double)changes[i].meta.updated_at);
-                        item.setProperty(rt, "is_deleted", (bool)(changes[i].meta.flags & SYNC_FLAG_TOMBSTONE));
-                        
-                        jsi_changes.setValueAtIndex(rt, i, item);
-                    }
-                    res.setProperty(rt, "changes", std::move(jsi_changes));
-                    
-                    resolve->call(*resolve, res);
-                });
-            }, DBScheduler::Priority::READ);
-        });
+    (void)runtime;
+    (void)args;
+    return facebook::jsi::Value::null();
 }
 
 facebook::jsi::Value DBEngine::applyRemoteChangesAsync(
     facebook::jsi::Runtime& runtime,
     const facebook::jsi::Value& args)
 {
-    if (!args.isArray()) {
-        throw facebook::jsi::JSError(runtime, "applyRemoteChangesAsync requires an array of changes");
-    }
-
-    struct RemoteChange {
-        std::string key;
-        std::vector<uint8_t> serialized_data;
-        uint64_t remote_version;
-        uint64_t updated_at;
-        bool is_deleted;
-    };
-
-    std::vector<RemoteChange> changes;
-    facebook::jsi::Array jsi_arr = args.asObject(runtime).asArray(runtime);
-    size_t len = jsi_arr.size(runtime);
-    changes.reserve(len);
-
-    for (size_t i = 0; i < len; ++i) {
-        facebook::jsi::Object obj = jsi_arr.getValueAtIndex(runtime, i).asObject(runtime);
-        RemoteChange rc;
-        rc.key = obj.getProperty(runtime, "key").asString(runtime).utf8(runtime);
-        rc.remote_version = static_cast<uint64_t>(obj.getProperty(runtime, "remote_version").asNumber());
-        rc.updated_at = static_cast<uint64_t>(obj.getProperty(runtime, "updated_at").asNumber());
-        rc.is_deleted = obj.getProperty(runtime, "is_deleted").asBool();
-
-        // Serialize the data now on JS thread
-        facebook::jsi::Value data = obj.getProperty(runtime, "data");
-        ArenaAllocator temp_arena(4096);
-        BinarySerializer::serialize(runtime, data, temp_arena);
-        rc.serialized_data.assign(temp_arena.data(), temp_arena.data() + temp_arena.size());
-
-        changes.push_back(std::move(rc));
-    }
-
-    return createPromise(runtime,
-        [this, changes = std::move(changes)](
-            std::shared_ptr<facebook::jsi::Function> resolve,
-            std::shared_ptr<facebook::jsi::Function> reject)
-        {
-            scheduler_->schedule([this, changes, resolve, reject] {
-                try {
-                    for (const auto& rc : changes) {
-                        std::shared_lock read_lock(rw_mutex_);
-                        size_t offset = btree_->find(rc.key);
-                        
-                        bool should_apply = true;
-                        if (offset != 0) {
-                            const uint8_t* raw_ptr = mmap_->get_address(offset + sizeof(uint32_t));
-                            if (raw_ptr) {
-                                SyncMetadata local_meta;
-                                std::memcpy(&local_meta, raw_ptr, sizeof(SyncMetadata));
-                                
-                                // Conflict resolution: LWW
-                                if (rc.remote_version < local_meta.remote_version) {
-                                    should_apply = false;
-                                } else if (rc.remote_version == local_meta.remote_version) {
-                                    if (rc.updated_at < local_meta.updated_at) {
-                                        should_apply = false;
-                                    }
-                                }
-                            }
-                        }
-                        read_lock.unlock();
-
-                        if (should_apply) {
-                            SyncMetadata meta;
-                            std::memset(&meta, 0, sizeof(SyncMetadata));
-                            meta.logical_clock = nextLogicalClock();
-                            meta.updated_at = rc.updated_at;
-                            meta.remote_version = rc.remote_version;
-                            meta.flags = (rc.is_deleted ? SYNC_FLAG_TOMBSTONE : 0); // NOT dirty, it came from remote
-
-                            insertRecBytes(rc.key, rc.serialized_data, true, rc.is_deleted, &meta);
-                        }
-                    }
-
-                    js_invoker_->invokeAsync([resolve] {
-                        resolve->call(*resolve, true);
-                    });
-                } catch (const std::exception& e) {
-                    js_invoker_->invokeAsync([reject, msg = std::string(e.what())] {
-                        reject->call(*reject, msg.c_str());
-                    });
-                }
-            }, DBScheduler::Priority::WRITE);
-        });
+    (void)runtime;
+    (void)args;
+    return facebook::jsi::Value::null();
 }
 
 facebook::jsi::Value DBEngine::markPushedAsync(
     facebook::jsi::Runtime& runtime,
     const facebook::jsi::Value& args)
 {
-    if (!args.isArray()) {
-        throw facebook::jsi::JSError(runtime, "markPushedAsync requires an array of ACKs");
-    }
-
-    struct Ack {
-        std::string key;
-        uint64_t remote_version;
-    };
-
-    std::vector<Ack> acks;
-    facebook::jsi::Array jsi_arr = args.asObject(runtime).asArray(runtime);
-    size_t len = jsi_arr.size(runtime);
-    acks.reserve(len);
-
-    for (size_t i = 0; i < len; ++i) {
-        facebook::jsi::Object obj = jsi_arr.getValueAtIndex(runtime, i).asObject(runtime);
-        Ack ack;
-        ack.key = obj.getProperty(runtime, "key").asString(runtime).utf8(runtime);
-        ack.remote_version = static_cast<uint64_t>(obj.getProperty(runtime, "remote_version").asNumber());
-        acks.push_back(std::move(ack));
-    }
-
-    return createPromise(runtime,
-        [this, acks = std::move(acks)](
-            std::shared_ptr<facebook::jsi::Function> resolve,
-            std::shared_ptr<facebook::jsi::Function> reject)
-        {
-            scheduler_->schedule([this, acks, resolve, reject] {
-                try {
-                    std::unique_lock lock(rw_mutex_);
-                    for (const auto& ack : acks) {
-                        size_t offset = btree_->find(ack.key);
-                        if (offset == 0) continue;
-
-                        const uint8_t* raw_ptr = mmap_->get_address(offset + sizeof(uint32_t));
-                        if (!raw_ptr) continue;
-
-                        SyncMetadata meta;
-                        std::memcpy(&meta, raw_ptr, sizeof(SyncMetadata));
-
-                        // Only clear dirty if it hasn't been changed again since we pushed
-                        // In this basic version, we just clear it.
-                        meta.flags &= ~SYNC_FLAG_DIRTY;
-                        meta.remote_version = ack.remote_version;
-
-                        // Write back in place since SyncMetadata size is fixed
-                        mmap_->write(offset + sizeof(uint32_t), reinterpret_cast<uint8_t*>(&meta), sizeof(SyncMetadata));
-                    }
-
-                    js_invoker_->invokeAsync([resolve] {
-                        resolve->call(*resolve, true);
-                    });
-                } catch (const std::exception& e) {
-                    js_invoker_->invokeAsync([reject, msg = std::string(e.what())] {
-                        reject->call(*reject, msg.c_str());
-                    });
-                }
-            }, DBScheduler::Priority::WRITE);
-        });
+    (void)runtime;
+    (void)args;
+    return facebook::jsi::Value::null();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Installer
-// ─────────────────────────────────────────────────────────────────────────────
+// ───────────────────────��─────────────────────────────────────────────────────
 void installDBEngine(
     facebook::jsi::Runtime& runtime,
     std::shared_ptr<facebook::react::CallInvoker> js_invoker,

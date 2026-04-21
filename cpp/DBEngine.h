@@ -146,7 +146,7 @@ private:
     
     // Sync OpLog tree
     std::unique_ptr<PersistentBPlusTree> oplog_pbtree_;
-    std::unique_ptr<BufferedBTree> oplog_btree_;
+    BufferedBTree* oplog_btree_ = nullptr;
 
     std::unique_ptr<WALManager> wal_;
     std::unique_ptr<DBScheduler> scheduler_;
