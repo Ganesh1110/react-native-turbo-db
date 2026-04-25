@@ -12,6 +12,8 @@ export enum TurboDBErrorCode {
   SCHEDULER_STOPPED = 1010,
   REPAIR_FAILED = 1011,
   QUOTA_EXCEEDED = 1012,
+  /** Feature is planned but not available in this release. */
+  NOT_SUPPORTED = 1013,
 }
 
 export class TurboDBError extends Error {

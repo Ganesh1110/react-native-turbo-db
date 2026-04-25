@@ -54,18 +54,35 @@ export class TurboDB {
     _size: number = 10 * 1024 * 1024,
     _options: DBOptions = {}
   ) {
-    if (IS_SERVER) {
-      console.log('TurboDB (Web): SSR Mode');
-    } else {
-      this.initPromise = this.ensureInitialized();
+    if (!IS_SERVER) {
+      // Kick off init in background — do NOT await here.
+      // All public methods call ensureInitialized() which returns the same promise.
+      // This avoids a re-entrant call: constructor sets initPromise FIRST.
+      this.initPromise = this._openIndexedDB();
     }
   }
 
+  /**
+   * Ensures IndexedDB is open and data is loaded.
+   * Thread-safe: concurrent callers all receive the same in-flight Promise.
+   */
   private async ensureInitialized(): Promise<void> {
     if (IS_SERVER || this.isInitialized) return;
+    // If init is already in flight (e.g., from constructor), return that same promise.
+    // Do NOT start a new one — this prevents the recursive loop.
     if (this.initPromise) return this.initPromise;
 
-    this.initPromise = new Promise((resolve, reject) => {
+    // Should never reach here (constructor sets initPromise), but guard defensively.
+    this.initPromise = this._openIndexedDB();
+    return this.initPromise;
+  }
+
+  /**
+   * Internal: Opens IndexedDB, creates schema if needed, loads data.
+   * Must only be called ONCE; result stored in initPromise.
+   */
+  private _openIndexedDB(): Promise<void> {
+    return new Promise((resolve, reject) => {
       const dbName = `turbodb_${this.path.replace(/\//g, '_')}`;
       const request = indexedDB.open(dbName, 1);
 
@@ -93,8 +110,6 @@ export class TurboDB {
         }
       };
     });
-
-    return this.initPromise;
   }
 
   private async loadFromIndexedDB(): Promise<void> {
@@ -208,7 +223,8 @@ export class TurboDB {
   }
 
   has(key: string): boolean {
-    return this.storage.has(key);
+    // Use get() rather than storage.has() so TTL-expired keys correctly return false
+    return this.get(key) !== undefined;
   }
 
   get<T = any>(key: string): T | undefined {
@@ -235,7 +251,14 @@ export class TurboDB {
     if (options.debounce) {
       this.scheduleSave();
     } else {
-      this.persistToIndexedDB().catch((e) => console.error(e));
+      // BUG-8 fix: surface persistence errors via the error notify channel
+      this.persistToIndexedDB().catch((e) => {
+        console.error('[TurboDB Web] persist failed:', e);
+        // Fire a synthetic error event so subscribers can react
+        this.listeners.forEach((cb) =>
+          cb({ type: 'remove' as any, key: '__error__', value: e })
+        );
+      });
     }
     return true;
   }
@@ -272,11 +295,17 @@ export class TurboDB {
   }
 
   length(): number {
-    return this.storage.size;
+    // Exclude internal __ keys from user-visible length count
+    let count = 0;
+    for (const key of this.storage.keys()) {
+      if (!key.startsWith('__')) count++;
+    }
+    return count;
   }
 
   getAllKeys(): string[] {
-    return Array.from(this.storage.keys());
+    // Exclude internal __ keys — mirrors native getAllKeys() behavior
+    return Array.from(this.storage.keys()).filter((k) => !k.startsWith('__'));
   }
 
   // --- Medium & Advanced API ---
@@ -304,7 +333,8 @@ export class TurboDB {
   async *streamKeys(): AsyncGenerator<string> {
     await this.ensureInitialized();
     for (const key of this.storage.keys()) {
-      if (!key.startsWith('__idx:')) yield key;
+      if (key.startsWith('__')) continue; // skip ALL internal prefixes
+      yield key;
     }
   }
 
@@ -438,9 +468,19 @@ export class TurboDB {
     return items;
   }
 
+  /**
+   * Wraps a set of writes.
+   * ⚠️ NOT atomic on web — no rollback on error. Use setMultiAsync() for batch safety.
+   * @deprecated Use setMultiAsync() for safe batch operations.
+   */
   async transaction(fn: (db: TurboDB) => Promise<void> | void): Promise<void> {
-    await fn(this);
-    await this.flush();
+    try {
+      await fn(this);
+      await this.flush();
+    } catch (e) {
+      console.error('[TurboDB Web] transaction(): no rollback on error.', e);
+      throw e;
+    }
   }
 
   async getAllKeysAsync(): Promise<string[]> {
@@ -589,6 +629,43 @@ export class TurboDB {
 
   benchmark(): number {
     return 0;
+  }
+
+  /**
+   * @throws {TurboDBError} NOT_SUPPORTED — key rotation is not available on web.
+   */
+  async setEncryptionKey(_key: string): Promise<void> {
+    throw new TurboDBError(
+      TurboDBErrorCode.NOT_SUPPORTED,
+      'setEncryptionKey is not supported on the web platform.'
+    );
+  }
+
+  // --- Diagnostic stubs for API parity with native ---
+  verifyHealth(): boolean {
+    return this.isInitialized;
+  }
+  repair(): boolean {
+    return true;
+  }
+  getDatabasePath(): string {
+    return this.path;
+  }
+  getWALPath(): string {
+    return '';
+  }
+  getStats() {
+    return {
+      treeHeight: 0,
+      nodeCount: this.storage.size,
+      formatVersion: 1,
+      fragmentationRatio: 0,
+      isInitialized: this.isInitialized,
+      secureMode: false,
+    };
+  }
+  setSecureMode(_enable: boolean): void {
+    /* no-op on web */
   }
 }
 

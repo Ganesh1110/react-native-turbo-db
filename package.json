@@ -5,10 +5,17 @@
   "main": "./lib/module/index.js",
   "exports": {
     ".": {
+      "react-native": {
+        "types": "./lib/typescript/src/index.d.ts",
+        "default": "./lib/module/index.js"
+      },
+      "browser": {
+        "types": "./lib/typescript/src/index.web.d.ts",
+        "default": "./lib/module/index.web.js"
+      },
+      "types": "./lib/typescript/src/index.d.ts",
       "import": "./lib/module/index.js",
-      "import.types": "./lib/typescript/src/index.d.ts",
       "require": "./lib/module/index.js",
-      "require.types": "./lib/typescript/src/index.d.ts",
       "default": "./lib/module/index.js"
     },
     "./package.json": "./package.json"
@@ -80,7 +87,7 @@
     "type": "git",
     "url": "https://github.com/Ganesh1110/rn-turbo-db.git"
   },
-  "author": "Ganesh Jayaprakash <ganesh@example.com> (https://github.com/ganeshjayaprakash)",
+  "author": "Ganesh Jayaprakash <ganesh@turbo-db.io> (https://github.com/ganeshjayaprakash)",
   "license": "MIT",
   "bugs": {
     "url": "https://github.com/Ganesh1110/rn-turbo-db/issues"

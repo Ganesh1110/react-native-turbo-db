@@ -22,7 +22,7 @@ declare const global: {
     setMulti(entries: Record<string, any>): boolean;
     getMultiple(keys: string[]): Record<string, any>;
     remove(key: string): boolean;
-    del(key: string): boolean;
+    del(key: string): boolean; // Alias for remove
     deleteAll(): boolean;
     benchmark(): number;
     rangeQuery(
@@ -32,6 +32,7 @@ declare const global: {
     getAllKeys(): string[];
     getAllKeysPaged(limit: number, offset: number): string[];
     flush(): void;
+    merge(key: string, partial: Record<string, any>): boolean;
     // ── Async API ──
     setAsync(args: { key: string; value: any }): Promise<boolean>;
     getAsync(key: string): Promise<any>;
@@ -167,10 +168,6 @@ export class TurboDB {
       );
     }
 
-    console.log('JS: initStorage called with options:', {
-      syncEnabled: this.options.syncEnabled,
-    });
-
     const success = global.NativeDB.initStorage(this.path, this.size, {
       syncEnabled: this.options.syncEnabled ?? false,
     });
@@ -214,11 +211,18 @@ export class TurboDB {
   // ── Synchronous API (fast path) ──────────────────────────────────────────
 
   /**
-   * For native, the JSI engine handles memory mapping and OS-level caching.
-   * This is a placeholder for parity with the vision API.
+   * Warms the in-memory B-Tree cache by touching the storage.
+   * On native, JSI/mmap handles OS-level page cache automatically;
+   * this is a semantic no-op kept for API parity with the vision spec.
+   * On web, this triggers IndexedDB load if not already initialized.
+   */
+  /**
+   * Warms the in-memory B-Tree cache by touching the storage.
+   *
+   * @deprecated Native caching is handled automatically by JSI/mmap. This is a no-op.
    */
   async warmCache(): Promise<void> {
-    this.ensureInitialized();
+    // JSI handles caching automatically; this is kept for API parity only
   }
 
   /**
@@ -230,7 +234,8 @@ export class TurboDB {
 
   has(key: string): boolean {
     this.ensureInitialized();
-    return global.NativeDB.findRec(key) !== undefined;
+    // Use get() instead of findRec() so TTL-expired keys correctly return false
+    return this.get(key) !== undefined;
   }
 
   private listeners: Set<
@@ -392,7 +397,8 @@ export class TurboDB {
   cleanupExpired(): void {
     const keys = this.getAllKeys();
     for (const key of keys) {
-      this.get(key); // This triggers the TTL check and cleanup
+      if (key.startsWith('__')) continue; // Skip internal index/sys keys
+      this.get(key); // Triggers TTL check and auto-cleanup if expired
     }
   }
 
@@ -521,32 +527,37 @@ export class TurboDB {
   }
 
   /**
-   * Async generator for streaming keys.
-   * Ideal for large datasets to avoid blocking.
+   * Async iterator that streams all user-facing keys one at a time.
+   * Skips all internal keys (prefixes: __idx:, __sys_, __oplog:).
+   * Ideal for large datasets to avoid loading all keys into memory at once.
    */
   async *streamKeys(): AsyncGenerator<string> {
     this.ensureInitialized();
     const keys = await this.getAllKeysAsync();
     for (const key of keys) {
-      if (key.startsWith('__idx:')) continue;
+      if (key.startsWith('__')) continue; // skip ALL internal prefixes
       yield key;
     }
   }
 
   /**
-   * Basic Transaction support (Atomic blocks).
-   * Note: Since JSI calls are synchronous and the engine is ACID/WAL compliant,
-   * this wraps multiple calls.
+   * Wraps a block of writes and calls flush() at the end.
+   *
+   * ⚠️ WARNING: This is NOT fully atomic. There is no rollback on error —
+   * any writes completed before an exception remain committed in the WAL.
+   * For true batch atomicity use `setMultiAsync()` which is a single native transaction.
+   *
+   * @deprecated Use `setMultiAsync()` for safe, truly-atomic batch writes.
    */
   async transaction(fn: (db: TurboDB) => Promise<void> | void): Promise<void> {
-    // WAL handles atomicity of individual writes.
-    // For full block atomicity, we'd need native BEGIN/COMMIT.
-    // This is a JS-side wrapper for now.
     try {
       await fn(this);
       this.flush();
     } catch (e) {
-      console.error('Transaction failed', e);
+      console.error(
+        '[TurboDB] transaction(): exception — partial writes already committed, NO rollback.',
+        e
+      );
       throw e;
     }
   }
@@ -604,7 +615,12 @@ export class TurboDB {
   }
 
   /**
-   * Async version of setIfNotExists().
+   * Sets the value only if the key does not already exist.
+   * Returns true if the value was set, false otherwise.
+   *
+   * ⚠️ Non-atomic on native. The check-then-set is two separate JSI calls.
+   * Avoid in high-concurrency scenarios (e.g., concurrent setAsync calls on the
+   * same key). For JS-thread-only access this is safe.
    */
   async setIfNotExistsAsync(key: string, value: any): Promise<boolean> {
     const exists = await this.getAsync(key);
@@ -616,19 +632,25 @@ export class TurboDB {
    * Atomic-like Compare-And-Set.
    * Sets the value to 'next' only if the current value matches 'expected'.
    * Comparison is done via JSON stringification for objects.
+   *
+   * ⚠️ Non-atomic on native. The get and set are two separate JSI calls.
+   * Safe for single-threaded JS access. If you have concurrent async writers on
+   * the same key, use a native atomic CAS (planned for a future native binding).
    */
   compareAndSet(key: string, expected: any, next: any): boolean {
     const current = this.get(key);
-    const matches = JSON.stringify(current) === JSON.stringify(expected);
-
-    if (matches) {
+    if (JSON.stringify(current) === JSON.stringify(expected)) {
       return this.set(key, next);
     }
     return false;
   }
 
   /**
-   * Async version of compareAndSet().
+   * Async Compare-And-Set.
+   *
+   * ⚠️ Non-atomic on native. The getAsync and setAsync are two separate calls.
+   * A concurrent setAsync between the two can cause a lost update.
+   * Safe for single-threaded usage. Concurrent-safe CAS is planned natively.
    */
   async compareAndSetAsync(
     key: string,
@@ -636,9 +658,7 @@ export class TurboDB {
     next: any
   ): Promise<boolean> {
     const current = await this.getAsync(key);
-    const matches = JSON.stringify(current) === JSON.stringify(expected);
-
-    if (matches) {
+    if (JSON.stringify(current) === JSON.stringify(expected)) {
       return this.setAsync(key, next);
     }
     return false;
@@ -745,7 +765,11 @@ export class TurboDB {
    */
   async removeAsync(key: string): Promise<boolean> {
     this.ensureInitialized();
-    return global.NativeDB.removeAsync(key);
+    const success = await global.NativeDB.removeAsync(key);
+    if (success) {
+      this.notify('remove', key);
+    }
+    return success;
   }
 
   // ── Sync API (used by SyncManager) ────────────────────────────────────────
@@ -868,12 +892,14 @@ export class TurboDB {
   }
 
   /**
-   * Triggers background compaction to reclaim space and optimize B-Tree.
+   * Triggers compaction to reclaim fragmented mmap space and optimize B-Tree structure.
+   *
+   * Note: Currently delegates to the WAL-first repair path, which also defragments
+   * the tree after archiving fragmented pages. A dedicated non-destructive compaction
+   * binding (DBScheduler::Priority::COMPACTION) is planned for a future native release.
    */
   async compact(): Promise<boolean> {
     this.ensureInitialized();
-    // In native, compaction is often triggered by remove() if fragmentation is high.
-    // This forces a health check and repair which optimizes the tree.
     return global.NativeDB.repair();
   }
 
@@ -881,7 +907,10 @@ export class TurboDB {
    * Export all data as a plain object.
    */
   async export(): Promise<Record<string, any>> {
-    const keys = await this.getAllKeysAsync();
+    // Filter internal __idx:, __sys:, __oplog: keys — only export user data
+    const keys = (await this.getAllKeysAsync()).filter(
+      (k) => !k.startsWith('__')
+    );
     return this.getMultipleAsync(keys);
   }
 
@@ -904,13 +933,17 @@ export class TurboDB {
   }
 
   /**
-   * Security: Set or Rotate encryption key.
-   * Note: Native engine handles libsodium key management.
+   * Rotate the active encryption key.
+   *
+   * @throws {TurboDBError} with code NOT_SUPPORTED — not yet implemented.
+   * Key rotation is managed by the native libsodium layer at initialization time.
+   * This API is reserved for a future native key-rotation binding.
    */
   async setEncryptionKey(_key: string): Promise<void> {
-    this.ensureInitialized();
-    // Placeholder for native key rotation call
-    console.log('[TurboDB] Encryption key set.');
+    throw new TurboDBError(
+      TurboDBErrorCode.NOT_SUPPORTED,
+      'setEncryptionKey is not yet implemented. Key rotation is managed by the native libsodium layer at init time.'
+    );
   }
 
   /**

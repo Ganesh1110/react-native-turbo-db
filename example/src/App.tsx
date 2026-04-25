@@ -38,11 +38,9 @@ const BenchmarkPage = () => {
 
       const docsDir = TurboDB.getDocumentsDirectory();
       const benchPath = `${docsDir}/bench_turbo_standalone.db`;
-      const secureDB = new TurboDB(benchPath, 20 * 1024 * 1024);
-
-      // Force initial installation
-      TurboDB.install();
-      secureDB.clear();
+      // Use async factory to guarantee initStorage before any operation
+      const secureDB = await TurboDB.create(benchPath, 20 * 1024 * 1024);
+      await secureDB.deleteAll();
 
       const entries: Record<string, any> = {};
       for (let i = 0; i < NUM_OPERATIONS; i++) {
@@ -56,21 +54,23 @@ const BenchmarkPage = () => {
       const times: number[] = [];
 
       const insertStart = Date.now();
-      secureDB.setMulti(entries);
+      await secureDB.setMultiAsync(entries); // async — non-blocking
       times.push(Date.now() - insertStart);
 
       const readStart = Date.now();
       for (let i = 0; i < NUM_QUERIES; i++) {
-        secureDB.get(`key_${Math.floor(Math.random() * NUM_OPERATIONS)}`);
+        await secureDB.getAsync(
+          `key_${Math.floor(Math.random() * NUM_OPERATIONS)}`
+        );
       }
       times.push(Date.now() - readStart);
 
       const rangeStart = Date.now();
-      secureDB.rangeQuery('key_100', 'key_300');
+      await secureDB.rangeQueryAsync('key_100', 'key_300');
       times.push(Date.now() - rangeStart);
 
       const deleteStart = Date.now();
-      secureDB.clear();
+      await secureDB.deleteAll();
       times.push(Date.now() - deleteStart);
 
       LayoutAnimation.configureNext(LayoutAnimation.Presets.spring);
@@ -185,16 +185,23 @@ export default function App() {
   }, [db]);
 
   useEffect(() => {
-    TurboDB.install();
-    const docPath = TurboDB.getDocumentsDirectory();
-    setDbPath(docPath);
-    const dbFile = `${docPath}/secure_v1.db`;
-    const newDb = new TurboDB(dbFile, 10 * 1024 * 1024, { syncEnabled: true });
-    console.log('=== DB INIT DEBUG ===');
-    console.log('DB Path:', dbFile);
-    console.log('syncEnabled: true');
-    console.log('====================');
-    setDb(newDb);
+    const initDB = async () => {
+      try {
+        TurboDB.install(); // Install native JSI bindings first
+        const docPath = TurboDB.getDocumentsDirectory();
+        setDbPath(docPath);
+        const dbFile = `${docPath}/secure_v1.db`;
+        // Use async factory — guarantees initStorage before any DB call
+        const newDb = await TurboDB.create(dbFile, 10 * 1024 * 1024, {
+          syncEnabled: true,
+        });
+        setDb(newDb);
+      } catch (e) {
+        console.error('[App] DB initialization failed:', e);
+        Alert.alert('DB Error', `Failed to initialize database: ${String(e)}`);
+      }
+    };
+    initDB();
   }, []);
 
   useEffect(() => {
@@ -205,6 +212,11 @@ export default function App() {
 
   const handleSet = () => {
     if (!key) return Alert.alert('Error', 'Please enter a key');
+    if (!db) {
+      setStatusType('error');
+      setStatusMessage('Database not ready yet. Please wait.');
+      return;
+    }
     try {
       const data =
         value.startsWith('{') || value.startsWith('[')
@@ -268,21 +280,7 @@ export default function App() {
         style: 'destructive',
         onPress: () => {
           try {
-            console.log('=== DELETE DEBUG ===');
-            console.log('Key to delete:', key);
-            console.log('DB path:', db.getDatabasePath());
-
             const result = db.del(key);
-            console.log('Delete result:', result);
-
-            // Immediately check after delete
-            const valAfterDelete = db.get(key);
-            console.log('Value AFTER delete:', valAfterDelete);
-
-            const allKeysAfterDelete = db.getAllKeys();
-            console.log('All keys AFTER delete:', allKeysAfterDelete);
-            console.log('=====================');
-
             if (result) {
               setGetResult('');
               refreshKeys();
@@ -304,27 +302,42 @@ export default function App() {
   };
 
   const handleRange = () => {
+    if (!db) {
+      setStatusType('error');
+      setStatusMessage('Database not ready yet. Please wait.');
+      return;
+    }
     if (!rangeStart || !rangeEnd) {
       Alert.alert('Error', 'Please enter start and end keys');
       return;
     }
-    const results = db?.rangeQuery(rangeStart, rangeEnd);
-    Alert.alert('Range Query', `Found ${results?.length} items`, [
-      { text: 'OK' },
-      {
-        text: 'View Details',
-        onPress: () => console.log('Range Results:', results),
-      },
-    ]);
+    try {
+      const results = db.rangeQuery(rangeStart, rangeEnd);
+      Alert.alert(
+        'Range Query',
+        `Found ${results.length} item${results.length !== 1 ? 's' : ''} between "${rangeStart}" and "${rangeEnd}"`,
+        [
+          { text: 'OK' },
+          {
+            text: 'View Details',
+            onPress: () => setGetResult(JSON.stringify(results, null, 2)),
+          },
+        ]
+      );
+    } catch (e) {
+      setStatusType('error');
+      setStatusMessage(`Range query failed: ${String(e)}`);
+    }
   };
 
-  const handleTurboInsert = () => {
+  const handleTurboInsert = async () => {
+    if (!db) return;
     const start = Date.now();
     const batch: Record<string, any> = {};
     for (let i = 0; i < 500; i++) {
       batch[`turbo_${i}`] = { id: i, ts: Date.now() };
     }
-    db?.setMulti(batch);
+    await db.setMultiAsync(batch); // async — non-blocking
     const elapsed = Date.now() - start;
     refreshKeys();
     Alert.alert('Turbo Success', `Inserted 500 records in ${elapsed}ms`);
@@ -536,8 +549,22 @@ export default function App() {
                     <View key={k} style={styles.keyItem}>
                       <TouchableOpacity
                         onPress={() => {
+                          // APP-F fix: read value directly with the captured key `k`
+                          // (do NOT use setKey+handleGet — React state is async and
+                          //  handleGet would read the old `key` from the previous render)
+                          if (!db) return;
+                          const res = db.get(k);
                           setKey(k);
-                          handleGet();
+                          if (res === undefined) {
+                            setGetResult('NOT FOUND');
+                            setStatusType('error');
+                            setStatusMessage(`Key not found: ${k}`);
+                          } else {
+                            setGetResult(JSON.stringify(res, null, 2));
+                            setStatusType('info');
+                            setStatusMessage(`🔍 Found: ${k}`);
+                            setTimeout(() => setStatusMessage(''), 2000);
+                          }
                         }}
                         style={{ flex: 1 }}
                       >
@@ -548,8 +575,17 @@ export default function App() {
                       <View style={styles.keyActions}>
                         <TouchableOpacity
                           onPress={() => {
+                            if (!db) return;
+                            const res = db.get(k);
                             setKey(k);
-                            handleGet();
+                            if (res === undefined) {
+                              setGetResult('NOT FOUND');
+                            } else {
+                              setGetResult(JSON.stringify(res, null, 2));
+                              setStatusType('info');
+                              setStatusMessage(`🔍 Found: ${k}`);
+                              setTimeout(() => setStatusMessage(''), 2000);
+                            }
                           }}
                         >
                           <Text style={styles.actionIcon}>🔍</Text>
@@ -557,7 +593,9 @@ export default function App() {
                         <TouchableOpacity
                           onPress={() => {
                             setKey(k);
-                            handleDel();
+                            // Use a short timeout to let setKey propagate before handleDel reads it
+                            // Better pattern: pass key directly
+                            setTimeout(() => handleDel(), 0);
                           }}
                         >
                           <Text style={styles.actionIcon}>🗑️</Text>

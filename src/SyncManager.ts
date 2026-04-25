@@ -58,6 +58,7 @@ export class SyncManager {
   // Local persistence for sync cursors
   private readonly CURSOR_KEY = '__sys_sync_cursor';
   private lastRemoteVersion: number = 0;
+  private lastPushedClock: number = 0;
 
   private listeners: Set<(event: SyncEvent, data?: any) => void> = new Set();
 
@@ -79,6 +80,9 @@ export class SyncManager {
       const state = await this.db.getAsync(this.CURSOR_KEY);
       if (state && typeof state.lastRemoteVersion === 'number') {
         this.lastRemoteVersion = state.lastRemoteVersion;
+      }
+      if (state && typeof state.lastPushedClock === 'number') {
+        this.lastPushedClock = state.lastPushedClock;
       }
     } catch {
       // Ignored: first time
@@ -141,15 +145,25 @@ export class SyncManager {
         this.lastRemoteVersion = pullResult.latest_remote_version;
         await this.db.setAsync(this.CURSOR_KEY, {
           lastRemoteVersion: this.lastRemoteVersion,
+          lastPushedClock: this.lastPushedClock,
         });
       }
       this.notify('pull_success', { count: pullResult.changes.length });
 
       // ── Step 2: Push Local Changes ──
-      const localChanges: SyncChanges = await this.db.getLocalChangesAsync(0);
+      // Use lastPushedClock (not 0) so we only push NEW changes since the last sync
+      const localChanges: SyncChanges = await this.db.getLocalChangesAsync(
+        this.lastPushedClock
+      );
       if (localChanges.changes.length > 0) {
         const acks = await this.adapter.pushChanges(localChanges.changes);
         await this.db.markPushedAsync(acks);
+        // Advance cursor so next sync only pushes new changes
+        this.lastPushedClock = localChanges.latest_clock;
+        await this.db.setAsync(this.CURSOR_KEY, {
+          lastRemoteVersion: this.lastRemoteVersion,
+          lastPushedClock: this.lastPushedClock,
+        });
       }
       this.notify('push_success', { count: localChanges.changes.length });
     } catch (error: any) {

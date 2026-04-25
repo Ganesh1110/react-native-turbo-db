@@ -1589,63 +1589,54 @@ facebook::jsi::Value DBEngine::setMultiAsync(
             std::shared_ptr<facebook::jsi::Function> resolve,
             std::shared_ptr<facebook::jsi::Function> reject) mutable
         {
+            // Route through insertRecBytes() which correctly handles:
+            //   1. SyncMetadata prepending when sync_enabled_
+            //   2. OpLog entry writing when sync_enabled_
+            //   3. CRC calculation and WAL logging
+            //   4. Encryption via crypto_
+            // Using shouldCommit=false per entry, then one final commit for the batch.
             scheduler_->schedule([this, rt_ptr = &rt, ev = std::move(ev), resolve, reject] {
                 bool ok = true;
+                std::string errMsg;
                 try {
                     std::unique_lock lock(rw_mutex_);
+
+                    // Open a single WAL transaction for the whole batch
                     if (is_secure_mode_ && wal_) wal_->logBegin();
 
                     for (const auto& entry : ev) {
-                        const uint8_t* payload_ptr = entry.bytes.data();
-                        size_t payload_len = entry.bytes.size();
-                        std::vector<uint8_t> encrypted;
-
-                        if (crypto_) {
-                            encrypted   = crypto_->encrypt(entry.bytes.data(), entry.bytes.size());
-                            payload_ptr = encrypted.data();
-                            payload_len = encrypted.size();
+                        // insertRecBytes handles SyncMetadata, OpLog, CRC, WAL, crypto
+                        if (!insertRecBytes(entry.key, entry.bytes, /*shouldCommit=*/false)) {
+                            ok = false;
+                            errMsg = "insertRecBytes failed for key: " + entry.key;
+                            break;
                         }
+                    }
 
-                        size_t offset  = next_free_offset_;
-                        uint32_t len32 = static_cast<uint32_t>(payload_len);
-                        uint32_t crc32 = 0;
-
+                    if (ok) {
+                        // Single commit + sync for the whole batch
                         if (is_secure_mode_ && wal_) {
-                            crc32 = wal_->calculate_crc32(payload_ptr, payload_len);
-                            wal_->logPageWrite(offset, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
-                            wal_->logPageWrite(offset + sizeof(uint32_t), payload_ptr, payload_len);
-                            wal_->logPageWrite(offset + sizeof(uint32_t) + payload_len,
-                                reinterpret_cast<const uint8_t*>(&crc32), sizeof(uint32_t));
+                            wal_->logCommit();
+                            wal_->sync();
                         }
-
-                        mmap_->write(offset, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
-                        mmap_->write(offset + sizeof(uint32_t), payload_ptr, payload_len);
-                        mmap_->write(offset + sizeof(uint32_t) + payload_len,
-                                     reinterpret_cast<const uint8_t*>(&crc32), sizeof(uint32_t));
-
-                        next_free_offset_ += sizeof(uint32_t) + payload_len +
-                                             (is_secure_mode_ ? sizeof(uint32_t) : 0);
-                        btree_->insert(entry.key, offset);
+                        btree_->flush();
+                        if (pbtree_) {
+                            pbtree_->setNextFreeOffset(next_free_offset_);
+                            pbtree_->checkpoint();
+                        }
                     }
-
-                    if (pbtree_) {
-                        pbtree_->setNextFreeOffset(next_free_offset_);
-                        pbtree_->checkpoint();
-                    }
-                    btree_->flush();
-
-                    if (is_secure_mode_ && wal_) { wal_->logCommit(); wal_->sync(); }
-
                 } catch (const std::exception& e) {
                     LOGE("setMultiAsync worker error: %s", e.what());
                     ok = false;
+                    errMsg = e.what();
                 }
 
-                js_invoker_->invokeAsync([rt_ptr, resolve, reject, ok] {
+                js_invoker_->invokeAsync([rt_ptr, resolve, reject, ok, errMsg] {
                     if (ok) {
                         resolve->call(*rt_ptr, facebook::jsi::Value(true));
                     } else {
-                        reject->call(*rt_ptr, facebook::jsi::String::createFromUtf8(*rt_ptr, "setMultiAsync failed"));
+                        reject->call(*rt_ptr, facebook::jsi::String::createFromUtf8(*rt_ptr,
+                            errMsg.empty() ? "setMultiAsync failed" : errMsg));
                     }
                 });
             }, DBScheduler::Priority::WRITE);
