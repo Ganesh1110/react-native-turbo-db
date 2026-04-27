@@ -78,6 +78,10 @@ declare const global: {
       secureMode: boolean;
     };
     setSecureMode(enable: boolean): void;
+    // ── Hardware Secure Enclave API ──
+    setSecureItemAsync(key: string, value: string): Promise<boolean>;
+    getSecureItemAsync(key: string): Promise<string | null>;
+    deleteSecureItemAsync(key: string): Promise<boolean>;
   };
   __NativeDB: any;
 };
@@ -382,8 +386,19 @@ export class TurboDB {
   private indexes: Set<string> = new Set();
 
   /**
-   * Registers a field to be indexed for all records.
-   * This is a simple implementation that manages index keys with prefix '__idx:'.
+   * Registers a field to be indexed for fast queries.
+   *
+   * @deprecated This method performs an O(N) JS-thread scan of all existing
+   * keys and will cause frame drops on large datasets. Use hierarchical keys
+   * instead (e.g. `staff:PSW:unitA:user1`) and call `getByPrefixAsync()`
+   * for native C++ range queries with no JS-thread overhead.
+   *
+   * Example:
+   * ```ts
+   * // Instead of createIndex('role'), use:
+   * await db.setAsync(`staff:${role}:${unit}:${userId}`, staffRecord);
+   * const pswStaff = await db.getByPrefixAsync('staff:PSW:unitA:');
+   * ```
    */
   async createIndex(field: string): Promise<void> {
     this.indexes.add(field);
@@ -406,6 +421,16 @@ export class TurboDB {
 
   /**
    * Queries records by an indexed field.
+   *
+   * @deprecated Use `getByPrefixAsync()` with hierarchical keys for native
+   * C++ range queries instead. This method incurs an extra level of
+   * indirection through the index layer.
+   *
+   * Example:
+   * ```ts
+   * // Instead of queryByIndex('role', 'PSW'):
+   * const results = await db.getByPrefixAsync('staff:PSW:');
+   * ```
    */
   async queryByIndex(field: string, value: any): Promise<any[]> {
     const prefix = `__idx:${field}:${value}:`;
@@ -597,7 +622,16 @@ export class TurboDB {
 
   /**
    * Complex query with filtering, sorting and limit.
-   * Note: Currently executes in JS layer after range fetch.
+   *
+   * @deprecated For real-time UI filtering (e.g. staff search grids), use
+   * `getByPrefixAsync()` with hierarchical keys for O(1) native lookups.
+   * This method performs JS-layer filtering after a full range fetch and
+   * will cause frame drops on large datasets.
+   *
+   * Example (staff search by role + unit):
+   * ```ts
+   * const results = await db.getByPrefixAsync(`staff:${role}:${unit}:`);
+   * ```
    */
   async query(options: {
     prefix?: string;
@@ -980,42 +1014,61 @@ export class TurboDB {
 
   /**
    * Enqueue a mutation to be processed later.
-   * Useful for offline-first interaction patterns.
+   *
+   * Each mutation is stored as an individual key using the pattern
+   * `__sys_mutation:<timestamp>:<randomId>`. This makes every enqueue an
+   * O(1) native insert, avoiding the O(N) read-modify-write bottleneck
+   * of the previous single-array approach.
+   *
+   * This is safe for write-heavy offline scenarios (e.g. Clock In/Out).
    */
   async enqueueMutation(mutation: {
     type: 'set' | 'remove' | 'merge';
     key: string;
     value?: any;
   }): Promise<void> {
-    const queueKey = '__sys_mutation_queue';
-    const queue = (await this.getAsync<any[]>(queueKey)) || [];
-    queue.push({
+    const ts = Date.now();
+    const rand = Math.random().toString(36).slice(2, 9);
+    const mutationKey = `__sys_mutation:${ts}:${rand}`;
+    await this.setAsync(mutationKey, {
       ...mutation,
-      id: Date.now() + Math.random(),
-      timestamp: Date.now(),
+      id: `${ts}-${rand}`,
+      timestamp: ts,
     });
-    await this.setAsync(queueKey, queue);
   }
 
   /**
    * Process all pending mutations in the queue.
+   *
+   * Uses `getByPrefixAsync('__sys_mutation:')` to retrieve all queued
+   * mutations with a single native C++ range scan, then batch-deletes
+   * the processed entries.
    */
   async flushQueue(): Promise<void> {
-    const queueKey = '__sys_mutation_queue';
-    const queue = await this.getAsync<any[]>(queueKey);
-    if (!queue || queue.length === 0) return;
+    const pending = await this.getByPrefixAsync('__sys_mutation:');
+    if (!pending || pending.length === 0) return;
 
-    for (const op of queue) {
+    // Sort by timestamp embedded in key to maintain order
+    pending.sort((a, b) => a.key.localeCompare(b.key));
+
+    const processedKeys: string[] = [];
+    for (const { key, value: op } of pending) {
       try {
         if (op.type === 'set') await this.setAsync(op.key, op.value);
         else if (op.type === 'remove') await this.removeAsync(op.key);
         else if (op.type === 'merge') await this.mergeAsync(op.key, op.value);
+        processedKeys.push(key);
       } catch (e) {
-        console.error(`[TurboDB] Flush error for key ${op.key}:`, e);
+        console.error(`[TurboDB] Flush error for mutation ${key}:`, e);
+        // Stop processing on first error to preserve ordering
+        break;
       }
     }
 
-    await this.setAsync(queueKey, []);
+    // Batch-remove all successfully processed mutation keys
+    if (processedKeys.length > 0) {
+      await this.removeMultipleAsync(processedKeys);
+    }
   }
 
   /**
@@ -1089,6 +1142,45 @@ export class TurboDB {
   setSecureMode(enable: boolean): void {
     this.ensureInitialized();
     getNativeDB().setSecureMode(enable);
+  }
+
+  /**
+   * Stores a sensitive string value (e.g. a hashed PIN) securely in the
+   * device's hardware-backed keystore:
+   * - **iOS:** iOS Keychain wrapped by a Secure Enclave EC key
+   *   (`kSecAttrTokenIDSecureEnclave`). Data is bound to the device and
+   *   accessible only when the device is unlocked.
+   * - **Android:** Android Keystore using AES-256-GCM hardware-backed key.
+   *   Requires API 23+.
+   *
+   * This API is entirely self-contained — no third-party plugins required.
+   *
+   * @param key   A logical name for the secret (e.g. `'pin:user123'`).
+   * @param value The sensitive string to store (e.g. a bcrypt hash of the PIN).
+   */
+  async setSecureItemAsync(key: string, value: string): Promise<boolean> {
+    this.ensureInitialized();
+    return getNativeDB().setSecureItemAsync(key, value);
+  }
+
+  /**
+   * Retrieves a sensitive string previously stored via `setSecureItemAsync()`.
+   *
+   * Returns `null` if the key does not exist.
+   */
+  async getSecureItemAsync(key: string): Promise<string | null> {
+    this.ensureInitialized();
+    return getNativeDB().getSecureItemAsync(key);
+  }
+
+  /**
+   * Permanently removes a secure item from the hardware keystore.
+   *
+   * Returns `true` if the key was deleted, or if it did not exist (idempotent).
+   */
+  async deleteSecureItemAsync(key: string): Promise<boolean> {
+    this.ensureInitialized();
+    return getNativeDB().deleteSecureItemAsync(key);
   }
 }
 

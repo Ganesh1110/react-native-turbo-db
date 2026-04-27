@@ -18,6 +18,10 @@
 #define LOGE(...) do {} while(0)
 #endif
 
+#ifdef __APPLE__
+#include "../ios/KeyManagerIOS.h"
+#endif
+
 namespace turbo_db {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -338,6 +342,74 @@ facebook::jsi::Value DBEngine::get(
             });
     }
 
+    if (propName == "setSecureItemAsync") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 2,
+            [this](facebook::jsi::Runtime& rt, const facebook::jsi::Value&,
+                   const facebook::jsi::Value* args, size_t) -> facebook::jsi::Value {
+                if (!args[0].isString() || !args[1].isString()) {
+                    return createPromise(rt, [](auto& r, auto, auto rej) {
+                        rej->call(r, facebook::jsi::String::createFromAscii(r, "setSecureItemAsync: expected (string, string)"));
+                    });
+                }
+                std::string k = args[0].asString(rt).utf8(rt);
+                std::string v = args[1].asString(rt).utf8(rt);
+                bool ok = false;
+#ifdef __APPLE__
+                ok = turbo_db::KeyManagerIOS::setSecureItem(k, v);
+#endif
+                return createPromise(rt, [ok](auto& r, auto resolve, auto) {
+                    resolve->call(r, facebook::jsi::Value(ok));
+                });
+            });
+    }
+
+    if (propName == "getSecureItemAsync") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 1,
+            [this](facebook::jsi::Runtime& rt, const facebook::jsi::Value&,
+                   const facebook::jsi::Value* args, size_t) -> facebook::jsi::Value {
+                if (!args[0].isString()) {
+                    return createPromise(rt, [](auto& r, auto, auto rej) {
+                        rej->call(r, facebook::jsi::String::createFromAscii(r, "getSecureItemAsync: expected string key"));
+                    });
+                }
+                std::string k = args[0].asString(rt).utf8(rt);
+                std::string result;
+#ifdef __APPLE__
+                result = turbo_db::KeyManagerIOS::getSecureItem(k);
+#endif
+                return createPromise(rt, [result](auto& r, auto resolve, auto) {
+                    if (result.empty()) {
+                        resolve->call(r, facebook::jsi::Value::null());
+                    } else {
+                        resolve->call(r, facebook::jsi::String::createFromUtf8(r, result));
+                    }
+                });
+            });
+    }
+
+    if (propName == "deleteSecureItemAsync") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 1,
+            [this](facebook::jsi::Runtime& rt, const facebook::jsi::Value&,
+                   const facebook::jsi::Value* args, size_t) -> facebook::jsi::Value {
+                if (!args[0].isString()) {
+                    return createPromise(rt, [](auto& r, auto, auto rej) {
+                        rej->call(r, facebook::jsi::String::createFromAscii(r, "deleteSecureItemAsync: expected string key"));
+                    });
+                }
+                std::string k = args[0].asString(rt).utf8(rt);
+                bool ok = false;
+#ifdef __APPLE__
+                ok = turbo_db::KeyManagerIOS::deleteSecureItem(k);
+#endif
+                return createPromise(rt, [ok](auto& r, auto resolve, auto) {
+                    resolve->call(r, facebook::jsi::Value(ok));
+                });
+            });
+    }
+
     return facebook::jsi::Value::undefined();
 }
 
@@ -374,6 +446,9 @@ std::vector<facebook::jsi::PropNameID> DBEngine::getPropertyNames(
     result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "getDatabasePath"));
     result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "getWALPath"));
     result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "setSecureMode"));
+    result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "setSecureItemAsync"));
+    result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "getSecureItemAsync"));
+    result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "deleteSecureItemAsync"));
     return result;
 }
 

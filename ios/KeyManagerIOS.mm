@@ -228,4 +228,105 @@ bool KeyManagerIOS::deleteMasterKey(const std::string& alias) {
     }
 }
 
+// ── Hardware Secure Item Storage ─────────────────────────────────────────────
+// Each item is stored as a separate kSecClassGenericPassword entry under the
+// service "TurboDBSecureItems". The raw value bytes are ECIES-wrapped by the
+// Secure Enclave public key before being stored, so they are opaque even if
+// the Keychain is extracted without the Secure Enclave private key.
+
+static NSString* kSecureItemService = @"TurboDBSecureItems";
+
+bool KeyManagerIOS::setSecureItem(const std::string& key, const std::string& value) {
+    @autoreleasepool {
+        NSString *nsKey = [NSString stringWithUTF8String:key.c_str()];
+        std::vector<uint8_t> plainBytes(value.begin(), value.end());
+
+        // Wrap with Secure Enclave public key
+        SecKeyRef privateKey = getOrCreateSecureEnclaveKey();
+        SecKeyRef publicKey = SecKeyCopyPublicKey(privateKey);
+        CFRelease(privateKey);
+        if (!publicKey) return false;
+
+        std::vector<uint8_t> wrapped;
+        @try {
+            wrapped = wrapMasterKey(plainBytes, publicKey);
+        } @catch (...) {
+            CFRelease(publicKey);
+            return false;
+        }
+        CFRelease(publicKey);
+
+        NSData *itemData = [NSData dataWithBytes:wrapped.data() length:wrapped.size()];
+
+        // Delete existing entry first (update pattern)
+        NSDictionary *deleteQuery = @{
+            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService: kSecureItemService,
+            (__bridge id)kSecAttrAccount: nsKey,
+        };
+        SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
+
+        NSDictionary *addQuery = @{
+            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService: kSecureItemService,
+            (__bridge id)kSecAttrAccount: nsKey,
+            (__bridge id)kSecAttrAccessible: (__bridge id)kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            (__bridge id)kSecValueData: itemData,
+        };
+
+        OSStatus status = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+        return status == errSecSuccess;
+    }
+}
+
+std::string KeyManagerIOS::getSecureItem(const std::string& key) {
+    @autoreleasepool {
+        NSString *nsKey = [NSString stringWithUTF8String:key.c_str()];
+
+        NSDictionary *query = @{
+            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService: kSecureItemService,
+            (__bridge id)kSecAttrAccount: nsKey,
+            (__bridge id)kSecReturnData: @YES,
+            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne,
+        };
+
+        CFTypeRef result = NULL;
+        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+        if (status != errSecSuccess || !result) return "";
+
+        NSData *itemData = (__bridge_transfer NSData*)result;
+        const uint8_t* bytes = (const uint8_t*)itemData.bytes;
+        std::vector<uint8_t> wrapped(bytes, bytes + itemData.length);
+
+        // Unwrap with Secure Enclave private key
+        SecKeyRef privateKey = getOrCreateSecureEnclaveKey();
+        std::vector<uint8_t> plain;
+        @try {
+            plain = unwrapMasterKey(wrapped, privateKey);
+        } @catch (...) {
+            CFRelease(privateKey);
+            return "";
+        }
+        CFRelease(privateKey);
+
+        return std::string(plain.begin(), plain.end());
+    }
+}
+
+bool KeyManagerIOS::deleteSecureItem(const std::string& key) {
+    @autoreleasepool {
+        NSString *nsKey = [NSString stringWithUTF8String:key.c_str()];
+
+        NSDictionary *query = @{
+            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService: kSecureItemService,
+            (__bridge id)kSecAttrAccount: nsKey,
+        };
+
+        OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
+        return status == errSecSuccess || status == errSecItemNotFound;
+    }
+}
+
 } // namespace turbo_db
