@@ -1,6 +1,7 @@
 #include "TurboDBImpl.h"
 #include "DBEngine.h"
 #include "SodiumCryptoContext.h"
+#include <vector>
 
 #if __has_include(<TurboDBSpecJSI.h>)
 #include <TurboDBSpecJSI.h>
@@ -17,58 +18,66 @@
 #ifdef DEBUG
 #define TURBODB_LOG(fmt, ...) NSLog(@"[TurboDB] " fmt, ##__VA_ARGS__)
 #else
-#define TURBODB_LOG(fmt, ...)
+#define TURBODB_LOG(fmt, ...) do {} while(0)
 #endif
 
 namespace facebook::react {
 
 TurboDBImpl::TurboDBImpl(std::shared_ptr<CallInvoker> jsInvoker)
-    : NativeTurboDBCxxSpec<TurboDBImpl>(std::move(jsInvoker)) {}
+    : NativeTurboDBCxxSpec<TurboDBImpl>(std::move(jsInvoker)) {
+    TURBODB_LOG("TurboDBImpl: CONSTRUCTOR CALLED");
+}
 
 bool TurboDBImpl::install(jsi::Runtime& rt) {
-    TURBODB_LOG("install: starting, runtime=%p", &rt);
+    TURBODB_LOG("install: START");
+    TURBODB_LOG("install: runtime=%p", &rt);
     
     if (&rt == nullptr) {
         TURBODB_LOG("install: ERROR - runtime is null!");
-        throw jsi::JSError(rt, "[TurboDB] JSI runtime is null - React Native JSI not initialized");
         return false;
     }
     
+    TURBODB_LOG("install: runtime is valid");
     auto js_invoker = this->jsInvoker_;
     
 #ifdef __APPLE__
-    try {
-        TURBODB_LOG("install: getting documents directory");
+    @try {
+        TURBODB_LOG("install: getting docs dir");
         std::string docsDir = getDocumentsDirectory(rt);
         TURBODB_LOG("install: docsDir=%s", docsDir.c_str());
         
-        TURBODB_LOG("install: getting/generating master key");
+#if TARGET_IPHONE_SIMULATOR
+        TURBODB_LOG("install: using fallback key");
+        std::vector<uint8_t> masterKey(32, 0);
+        for (int i = 0; i < 32; i++) masterKey[i] = (uint8_t)(i * 7 + 13);
+#else
+        TURBODB_LOG("install: getting key");
         auto masterKey = turbo_db::KeyManagerIOS::getOrGenerateMasterKey("TurboDBMasterKey");
+#endif
         
-        TURBODB_LOG("install: creating SodiumCryptoContext");
+        TURBODB_LOG("install: creating crypto");
         auto crypto = std::make_unique<turbo_db::SodiumCryptoContext>();
         crypto->setMasterKey(masterKey);
         
         TURBODB_LOG("install: calling installDBEngine");
         turbo_db::installDBEngine(rt, js_invoker, std::move(crypto));
         
-        // Verify installation
         if (rt.global().hasProperty(rt, "NativeDB")) {
-            TURBODB_LOG("install: SUCCESS - NativeDB is now available on global");
+            TURBODB_LOG("install: SUCCESS");
             return true;
         } else {
-            TURBODB_LOG("install: WARNING - NativeDB not found on global after install");
+            TURBODB_LOG("install: WARNING - NativeDB not found");
             return true;
         }
-    } catch (NSException *exception) {
+    } @catch (NSException *exception) {
         TURBODB_LOG("install: NSException - %@", exception.reason);
-        throw jsi::JSError(rt, [NSString stringWithFormat:@"[TurboDB] install failed: %@", exception.reason]);
-    } catch (const std::exception& e) {
-        TURBODB_LOG("install: std::exception - %s", e.what());
-        throw jsi::JSError(rt, [NSString stringWithFormat:@"[TurboDB] install failed: %s", e.what()]);
+        return false;
+    } @catch (id exception) {
+        TURBODB_LOG("install: ObjC exception - %@", exception);
+        return false;
     }
 #else
-    TURBODB_LOG("install: not Apple platform - skipping JSI install");
+    TURBODB_LOG("install: not Apple");
 #endif
     return true;
 }

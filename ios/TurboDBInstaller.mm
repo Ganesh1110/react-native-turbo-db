@@ -2,6 +2,8 @@
 #import <React/RCTBridgeModule.h>
 #import "TurboDBImpl.h"
 
+#define TURBODB_LOG(fmt, ...) NSLog(@"[TurboDB] " fmt, ##__VA_ARGS__)
+
 @interface TurboDBInstaller : NSObject <RCTBridgeModule>
 @end
 
@@ -12,7 +14,7 @@ RCT_EXPORT_MODULE(TurboDBInstaller);
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(install)
 {
-  // This creates a stub - actual JSI installation will be done via TurboModule
+  TURBODB_LOG("TurboDBInstaller: install called");
   return @true;
 }
 

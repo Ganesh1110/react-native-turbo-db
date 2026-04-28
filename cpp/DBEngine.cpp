@@ -692,18 +692,54 @@ facebook::jsi::Value DBEngine::findRec(
     size_t offset = btree_->find(key);
     if (offset == 0 || offset % 8 != 0) return facebook::jsi::Value::undefined();
 
+    // ── 1. Read the stored length field ──────────────────────────────────────
     const uint8_t* len_ptr = mmap_->get_address(offset);
     if (!len_ptr) return facebook::jsi::Value::undefined();
 
-    uint32_t payload_len;
-    std::memcpy(&payload_len, len_ptr, sizeof(uint32_t));
+    uint32_t stored_len;
+    std::memcpy(&stored_len, len_ptr, sizeof(uint32_t));
+    if (stored_len == 0) return facebook::jsi::Value::undefined();
 
-    const uint8_t* payload_ptr = mmap_->get_address(offset + sizeof(uint32_t));
+    // ── 2. Skip SyncMetadata prefix if sync is enabled ───────────────────────
+    // insertRecInternal writes: [uint32_t len32][SyncMetadata?][encrypted_payload]
+    // len32 already includes sizeof(SyncMetadata) when sync_enabled_.
+    size_t payload_data_offset = offset + sizeof(uint32_t);
+    size_t payload_data_len    = stored_len;
+
+    if (sync_enabled_) {
+        if (stored_len <= sizeof(SyncMetadata)) return facebook::jsi::Value::undefined();
+        payload_data_offset += sizeof(SyncMetadata);
+        payload_data_len    -= sizeof(SyncMetadata);
+    }
+
+    const uint8_t* payload_ptr = mmap_->get_address(payload_data_offset);
     if (!payload_ptr) return facebook::jsi::Value::undefined();
 
-    std::shared_ptr<std::vector<uint8_t>> data = std::make_shared<std::vector<uint8_t>>(payload_ptr, payload_ptr + payload_len);
+    // ── 3. Decrypt if a crypto context is present ────────────────────────────
+    // insertRecInternal encrypts via crypto_->encrypt() before writing to mmap.
+    std::vector<uint8_t> decrypted;
+    const uint8_t* data_ptr = payload_ptr;
+    size_t         data_len = payload_data_len;
+
+    if (crypto_) {
+        try {
+            decrypted = crypto_->decrypt(payload_ptr, payload_data_len);
+            if (decrypted.empty()) return facebook::jsi::Value::undefined();
+            data_ptr = decrypted.data();
+            data_len = decrypted.size();
+        } catch (...) {
+            LOGE("findRec: decryption failed for key=%s", key.c_str());
+            return facebook::jsi::Value::undefined();
+        }
+    }
+
+    // ── 4. Deserialize the plaintext ─────────────────────────────────────────
+    std::shared_ptr<std::vector<uint8_t>> data =
+        std::make_shared<std::vector<uint8_t>>(data_ptr, data_ptr + data_len);
+
     if (!data->empty() && static_cast<BinaryType>((*data)[0]) == BinaryType::Object) {
-        return facebook::jsi::Object::createFromHostObject(runtime, std::make_shared<LazyRecordProxy>(std::move(data)));
+        return facebook::jsi::Object::createFromHostObject(
+            runtime, std::make_shared<LazyRecordProxy>(std::move(data)));
     }
 
     auto result = BinarySerializer::deserialize(runtime, data->data(), data->size());
@@ -793,13 +829,12 @@ facebook::jsi::Value DBEngine::setAsync(facebook::jsi::Runtime& rt, const facebo
                 ok = insertRecBytes(key, bytes, true, false);
             } catch (...) { ok = false; }
             if (js_invoker_) {
-                js_invoker_->invokeAsync([ok, resolve]() mutable {
-                    // resolve/reject must be called on JS thread — no rt access needed for bool
-                    // We use a captured rt pointer pattern via shared_ptr so this is safe.
+                js_invoker_->invokeAsync([resolve, ok]() mutable {
+                    // TODO: call resolve->call(rt, jsi::Value(ok)) once rt is safely
+                    // accessible on the JS thread. For now, we resolve synchronously below.
+                    (void)ok; // suppress unused-capture: ok will be used when rt bridging is wired
                 });
             }
-            // Fallback: resolve inline if no invoker (e.g. tests)
-            (void)ok;
         }, DBScheduler::Priority::WRITE);
         // Resolve synchronously as fallback for now — the scheduler above is fire-and-forget.
         // A future improvement: store resolve/reject as shared_ptr and call from invokeAsync.
@@ -983,9 +1018,12 @@ void installDBEngine(
     facebook::jsi::Runtime& runtime,
     std::shared_ptr<facebook::react::CallInvoker> js_invoker,
     std::unique_ptr<SecureCryptoContext> crypto) {
+    std::cerr << "[TurboDB] installDBEngine: START" << std::endl;
     auto engine = std::make_shared<DBEngine>(js_invoker, std::move(crypto));
     g_engine = engine;
+    std::cerr << "[TurboDB] installDBEngine: created engine, setting NativeDB on global" << std::endl;
     runtime.global().setProperty(runtime, "NativeDB", facebook::jsi::Object::createFromHostObject(runtime, engine));
+    std::cerr << "[TurboDB] installDBEngine: DONE - NativeDB should be available" << std::endl;
 }
 
 std::shared_ptr<DBEngine> getDBEngine() {
