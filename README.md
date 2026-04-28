@@ -1,224 +1,698 @@
-# react-native-turbo-db
+# TurboDB
 
-[![NPM Version](https://img.shields.io/npm/v/react-native-turbo-db.svg?style=flat-square)](https://www.npmjs.com/package/react-native-turbo-db)
-[![License](https://img.shields.io/npm/l/react-native-turbo-db.svg?style=flat-square)](https://npmjs.org/package/react-native-turbo-db)
-[![Platform](https://img.shields.io/badge/platform-android%20%7C%20ios%20%7C%20web-blue.svg?style=flat-square)](https://npmjs.org/package/react-native-turbo-db)
-[![New Architecture](https://img.shields.io/badge/architecture-TurboModule%20%7C%20JSI-green.svg?style=flat-square)](https://reactnative.dev/docs/the-new-architecture/landing)
-[![Web Support](https://img.shields.io/badge/web-IndexedDB-orange.svg?style=flat-square)](https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API)
+<p align="center">
+  <a href="https://www.npmjs.com/package/react-native-turbo-db">
+    <img src="https://img.shields.io/npm/v/react-native-turbo-db.svg" alt="npm version" />
+  </a>
+  <a href="https://www.npmjs.com/package/react-native-turbo-db">
+    <img src="https://img.shields.io/npm/dm/react-native-turbo-db.svg" alt="npm downloads" />
+  </a>
+  <a href="https://github.com/ganeshjayaprakash/react-native-turbo-db/blob/main/LICENSE">
+    <img src="https://img.shields.io/npm/l/react-native-turbo-db.svg" alt="MIT License" />
+  </a>
+  <a href="https://github.com/ganeshjayaprakash/react-native-turbo-db/actions">
+    <img src="https://img.shields.io/github/actions/workflow/status/ganeshjayaprakash/react-native-turbo-db/ci.yml" alt="CI Status" />
+  </a>
+  <a href="https://reactnative.dev/">
+    <img src="https://img.shields.io/badge/React%20Native-0.85-blue.svg" alt="React Native" />
+  </a>
+</p>
 
-## 🏗️ Supported Platforms & Frameworks
+A **high-performance, encrypted embedded database** for React Native built on C++, leveraging the New Architecture (JSI/TurboModules) for native-speed operations.
 
-| Platform                            | Support    | Description                               |
-| :---------------------------------- | :--------- | :---------------------------------------- |
-| **React Native (New Architecture)** | ✅ Full    | TurboModule + JSI for maximum performance |
-| **React Native (Old Architecture)** | ⚠️ Limited | Works but uses fallback bridge            |
-| **React JS / Vanilla JS**           | ✅ Full    | Uses IndexedDB backend, SSR-safe          |
-| **Node.js / Deno**                  | ✅ Full    | Uses IndexedDB polyfill or localStorage   |
-| **Next.js (SSR)**                   | ✅ Full    | Server-side rendering safe                |
-| **Remix**                           | ✅ Full    | Server-side rendering safe                |
-| **Expo**                            | ✅ Full    | Works with `npx expo prebuild`            |
-| **React Native Web**                | ✅ Full    | Uses IndexedDB fallback                   |
+## Why TurboDB?
 
-> **Note**: TurboDB is designed for React Native's New Architecture (TurboModules). For web/SSR platforms, it automatically falls back to IndexedDB with the same API.
+Most React Native storage solutions rely on AsyncStorage (slow, async-only) or complex SQLite wrappers. TurboDB is purpose-built for the New Architecture:
 
-## 🌟 Why TurboDB?
+- **JSI-Native Speed** — Direct C++ access without the async bridge overhead. Synchronous reads in your render function, zero "flash of missing content".
+- **Zero Serialization** — Native B+Tree storage eliminates `JSON.stringify` overhead on every write.
+- **Military-Grade Encryption** — All data encrypted at rest using XChaCha20-Poly1305 (libsodium), backed by hardware keystores (iOS Keychain / Android Keystore).
+- **ACID Compliant** — Write-Ahead Logging (WAL) ensures your data survives crashes and power loss.
+- **Isomorphic** — Same API works on React Native, Web (IndexedDB), and SSR frameworks (Next.js, Remix).
 
-Most React Native storage solutions rely on the asynchronous bridge (AsyncStorage) or complex SQLite wrappers. **TurboDB** is built for the **New Architecture**, using **JSI (JavaScript Interface)** to expose a native C++ engine directly to the JavaScript runtime.
+## Features
 
-- **Zero Serialization**: No more JSON.stringify overhead on every write.
-- **Instant Reads**: Access data synchronously in your render functions without "Flash of Missing Content".
-- **Military Grade**: Data is encrypted using **XChaCha20-Poly1305 AEAD** (Libsodium) before it ever touches the disk.
-- **SEO & SSR Optimized**: Built-in isomorphic support with a robust `IndexedDB` backend for web, enabling synchronous hydration and zero-CLS (Cumulative Layout Shift).
+### Core Capabilities
+- ⚡ **Synchronous reads** — Access data instantly, no await needed
+- 🔐 **End-to-end encryption** — XChaCha20-Poly1305 with hardware-backed keys
+- 💾 **ACID transactions** — WAL ensures data integrity
+- 🗜️ **B+Tree indexing** — Fast range queries and pagination
 
-## 🚀 Features
+### Advanced
+- 📡 **Offline-first sync** — Built-in SyncManager for remote synchronization
+- 🔑 **Secure enclave storage** — Hardware-protected secrets (PINs, tokens)
+- ⏱️ **TTL support** — Auto-expiring keys
+- 📊 **Metrics & diagnostics** — Health checks, compaction, stats
 
-- **Turbo Module**: 100% compatible with React Native's New Architecture.
-- **Hardware-Backed Keys**: Master keys are protected by the Android KeyStore and iOS Keychain.
-- **ACID Compliant (WAL)**: Write-Ahead Logging ensures your data survives app crashes or power loss.
-- **Smart Memory Mapping**: Uses `mmap` for efficient I/O, allowing the OS to handle caching optimally.
-- **Sync & Async APIs**: Use `.get()` for instant results or `.getAsync()` for heavy background processing.
-- **Rich Querying**: Built-in support for lexicographical range queries, batch operations, and **paginated key retrieval**.
+## Installation
 
-## 📦 Installation
-
-```sh
+```bash
 npm install react-native-turbo-db
 # or
 yarn add react-native-turbo-db
 ```
 
-### Requirements
-
-| Requirement               | Version           | Notes                            |
-| :------------------------ | :---------------- | :------------------------------- |
-| **React Native**          | ≥0.76.0           | Recommended for New Architecture |
-| **React Native CLI**      | Latest            | Required for native builds       |
-| **Node.js**               | ≥18.0.0           | For build tooling                |
-| **iOS Deployment Target** | ≥15.1             | Required for TurboModules        |
-| **Android minSdkVersion** | ≥24 (Android 7.0) | For Libsodium crypto support     |
-
 ### iOS
 
-```sh
+```bash
 cd ios && pod install
 ```
 
 ### Android
 
-No additional setup required! Ensure you have the New Architecture enabled in your `gradle.properties`.
+No additional setup required. Ensure you have the New Architecture enabled:
 
-### Web (SSR/Next.js/Remix)
-
-TurboDB works out-of-the-box on the web using `IndexedDB`. It is SSR-safe and won't crash during server-side rendering.
-
-### Vanilla JavaScript / Node.js
-
-You can also use TurboDB in plain JavaScript projects:
-
-```html
-<script type="module">
-  import { TurboDB } from 'https://esm.sh/react-native-turbo-db';
-
-  const db = new TurboDB('my_data', 10 * 1024 * 1024);
-  db.set('hello', 'world');
-  console.log(db.get('hello')); // "world"
-</script>
+```properties
+# android/gradle.properties
+newArchEnabled=true
 ```
 
-For Node.js, install and use:
+### Web / SSR
+
+Works out of the box with IndexedDB:
 
 ```bash
 npm install react-native-turbo-db
 ```
 
-```javascript
-import { TurboDB } from 'react-native-turbo-db';
-
-const db = new TurboDB('./data.db');
-db.set('key', 'value');
+```tsx
+// next.config.js (for SSR compatibility)
+module.exports = {
+  webpack: (config) => {
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      'react-native': 'react-native-turbo-db',
+    };
+    return config;
+  },
+};
 ```
 
-## 🛠 Usage
+## Quick Start
+
+```tsx
+import { TurboDB } from 'react-native-turbo-db';
+
+const db = await TurboDB.create('my_app', 10 * 1024 * 1024);
+
+// Synchronous - instant reads, no await
+db.set('user', { name: 'Alice', role: 'admin' });
+const user = db.get('user'); // { name: 'Alice', role: 'admin' }
+
+// Asynchronous - for large operations (runs on DBWorker thread)
+await db.setAsync('settings', { theme: 'dark', notifications: true });
+const settings = await db.getAsync('settings');
+```
+
+## API Reference
 
 ### Initialization
 
-Initialize the database. It's recommended to do this once at the app root.
+#### `TurboDB.create(path, size?, options?)`
 
-```typescript
-import { TurboDB } from 'react-native-turbo-db';
+Creates and initializes a new database instance.
 
-// Get a platform-specific safe path
-const docsDir = TurboDB.getDocumentsDirectory();
-const dbPath = `${docsDir}/app_secure_v1.db`;
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `path` | `string` | — | Full path to database file |
+| `size` | `number` | `10 * 1024 * 1024` | Initial file size in bytes |
+| `options.syncEnabled` | `boolean` | `false` | Enable Write-Ahead Logging |
 
-// Create DB instance (Default: 10MB file, automatically expands)
-const db = new TurboDB(dbPath, 10 * 1024 * 1024);
+```tsx
+const db = await TurboDB.create(
+  `${TurboDB.getDocumentsDirectory()}/app.db`,
+  10 * 1024 * 1024,
+  { syncEnabled: true }
+);
 ```
 
-### Basic CRUD (Synchronous)
+---
 
-```typescript
-// CREATE / UPDATE
-db.set('user', { id: '7', role: 'admin', settings: { theme: 'dark' } });
+### Synchronous API
 
-// READ
-const user = db.get<{ id: string }>('user');
+> **Note**: These methods block the JS thread briefly. For very large values (>1MB), use async variants.
 
-// DELETE
-db.remove('user');
+#### `db.set(key, value)` → `boolean`
 
-// CHECK EXISTENCE
-const exists = db.has('user');
+Set a value. Returns `true` on success.
+
+```tsx
+db.set('key', { foo: 'bar' });
 ```
 
-### Pagination & Range Queries
+#### `db.get<T>(key)` → `T | undefined`
 
-```typescript
-// Paged Key Retrieval (Performance optimization for large datasets)
-const first100Keys = db.getAllKeysPaged(100, 0);
+Get a value. Returns `undefined` if not found.
 
-// Multi-Set (Atomic)
-db.setMulti({
-  token: 'secret_abc',
-  expires: 3600,
-});
-
-// Range Query (Great for paginated lists or time-series data)
-const logs = db.rangeQuery('log_2023-01-01', 'log_2023-12-31');
-```
-
-### Asynchronous Operations
-
-Avoid blocking the UI thread for extremely large payloads:
-
-```typescript
-async function heavyWork() {
-  const data = await db.getAsync('massive_config_file');
-  await db.setAsync('background_task_result', { status: 'done' });
+```tsx
+const user = db.get<User>('user');
+if (user) {
+  console.log(user.name);
 }
 ```
 
-## 🔐 Security
+#### `db.has(key)` → `boolean`
 
-TurboDB generates a unique 256-bit master key for every installation.
+Check if a key exists.
 
-- **Android**: Stored in encrypted `SharedPreferences`.
-- **iOS**: Stored in `Keychain` with `kSecAttrAccessibleAfterFirstUnlock`.
-- **Encryption**: Records are encrypted using `crypto_aead_xchacha20poly1305_ietf`, providing both confidentiality and authenticity (MAC).
+```tsx
+const exists = db.has('user');
+```
 
-## 📊 Performance Benchmarks
+#### `db.remove(key)` / `db.del(key)` → `boolean`
 
-_Tested on iPhone 15 Pro / Pixel 8. Operations per 1000 items._
+Delete a key.
 
-| Operation       | TurboDB (JSI) | AsyncStorage | SQLite (Bridge) |
-| :-------------- | :------------ | :----------- | :-------------- |
-| **Bulk Write**  | **~10ms**     | ~180ms       | ~60ms           |
-| **Random Read** | **~4ms**      | ~120ms       | ~45ms           |
+```tsx
+db.remove('user');
+// or
+db.del('user');
+```
 
-## 📋 API Reference
+#### `db.setMulti(entries)` → `boolean`
 
-| Method                              | Description           | Platform Support |
-| :---------------------------------- | :-------------------- | :--------------- |
-| `db.set(key, value)`                | Synchronous write     | Native, Web      |
-| `db.get(key)`                       | Synchronous read      | Native, Web      |
-| `db.has(key)`                       | Check key existence   | Native, Web      |
-| `db.remove(key)` / `db.del(key)`    | Delete a key          | Native, Web      |
-| `db.setMulti(entries)`              | Bulk atomic write     | Native, Web      |
-| `db.getMultiple(keys)`              | Bulk read             | Native, Web      |
-| `db.getAllKeys()`                   | Get all keys          | Native, Web      |
-| `db.getAllKeysPaged(limit, offset)` | Paginated keys        | Native only      |
-| `db.rangeQuery(startKey, endKey)`   | Range query           | Native only      |
-| `db.clear()` / `db.deleteAll()`     | Clear all data        | Native, Web      |
-| `db.flush()`                        | Force write to disk   | Native only      |
-| `db.benchmark()`                    | Performance benchmark | Native only      |
-| `TurboDB.install()`                 | Initialize JSI        | Native only      |
-| `TurboDB.getDocumentsDirectory()`   | Get data directory    | Native, Web      |
+Atomic batch write.
 
-## 🔧 Troubleshooting
+```tsx
+db.setMulti({
+  token: 'abc123',
+  refresh: 'xyz789',
+  expires: Date.now() + 3600000,
+});
+```
 
-### Common Issues
+#### `db.getMultiple(keys)` → `Record<string, any>`
 
-**"Native module 'TurboDB' not found"**
+Batch read multiple keys.
 
-- Ensure you've rebuilt the native app: `npx react-native run-ios` or `npx react-native run-android`
-- Verify New Architecture is enabled in `gradle.properties` (Android) or `Podfile` (iOS)
+```tsx
+const results = db.getMultiple(['user', 'settings', 'theme']);
+// { user: {...}, settings: {...}, theme: {...} }
+```
 
-**Slow performance on first launch**
+#### `db.getAllKeys()` → `string[]`
 
-- First run includes key generation and initialization. Subsequent launches are faster.
+Get all user keys (excludes internal keys).
 
-**Data not persisting after app update**
+```tsx
+const keys = db.getAllKeys();
+```
 
-- TurboDB stores data in app's documents directory. Data persists across updates.
+#### `db.getAllKeysPaged(limit, offset)` → `string[]`
 
-## 🤝 Contributing
+Paginated key enumeration for large datasets.
 
-Contributions are welcome! Please see our [Contributing Guide](CONTRIBUTING.md).
+```tsx
+// First 100 keys
+const page1 = db.getAllKeysPaged(100, 0);
+// Next 100 keys
+const page2 = db.getAllKeysPaged(100, 100);
+```
 
-## 📄 License
+#### `db.rangeQuery(startKey, endKey)` → `RangeQueryResult[]`
+
+Range query for lexicographically ordered keys.
+
+```tsx
+// Get all logs from 2024-01-01 to 2024-12-31
+const logs = db.rangeQuery('log_2024-01-01', 'log_2024-12-31');
+// [{ key: 'log_2024-01-01', value: {...} }, ...]
+```
+
+#### `db.getByPrefix(prefix)` → `RangeQueryResult[]`
+
+Get all records with keys starting with prefix.
+
+```tsx
+const users = db.getByPrefix('user:');
+// All keys starting with 'user:'
+```
+
+#### `db.clear()` / `db.deleteAll()` → `boolean`
+
+Clear all data.
+
+```tsx
+db.clear();
+```
+
+---
+
+### Asynchronous API
+
+> **Note**: These methods run on a background DBWorker thread, non-blocking.
+
+#### `await db.setAsync(key, value)` → `boolean`
+
+Async set for large values.
+
+```tsx
+await db.setAsync('largeConfig', hugeObject);
+```
+
+#### `await db.getAsync<T>(key)` → `T | undefined`
+
+Async read for large values.
+
+```tsx
+const data = await db.getAsync('largeConfig');
+```
+
+#### `await db.setMultiAsync(entries)` → `boolean`
+
+Async batch write — atomic, all-or-nothing.
+
+```tsx
+await db.setMultiAsync({
+  item1: {...},
+  item2: {...},
+  item3: {...},
+});
+```
+
+#### `await db.getMultipleAsync(keys)` → `Record<string, any>`
+
+Async batch read.
+
+```tsx
+const results = await db.getMultipleAsync(['a', 'b', 'c']);
+```
+
+#### `await db.getAllKeysAsync()` → `string[]`
+
+Async key enumeration.
+
+```tsx
+const allKeys = await db.getAllKeysAsync();
+```
+
+#### `await db.rangeQueryAsync(startKey, endKey)` → `RangeQueryResult[]`
+
+Async range query.
+
+```tsx
+const results = await db.rangeQueryAsync('user:', 'user;\uffff');
+```
+
+---
+
+### Advanced Features
+
+#### TTL (Time-To-Live)
+
+#### `db.setWithTTL(key, value, ttlMs)` → `boolean`
+
+Set a value that expires after `ttlMs` milliseconds.
+
+```tsx
+// Expires in 1 hour
+db.setWithTTL('temp_token', 'abc123', 60 * 60 * 1000);
+```
+
+#### `db.cleanupExpired()`
+
+Manually remove expired keys.
+
+```tsx
+db.cleanupExpired();
+```
+
+#### Merging
+
+#### `db.merge(key, partial)` → `boolean`
+
+Deep merge into existing object.
+
+```tsx
+db.set('user', { name: 'Alice', age: 30 });
+db.merge('user', { age: 31 }); // { name: 'Alice', age: 31 }
+```
+
+#### `await db.mergeAsync(key, partial)` → `boolean`
+
+Async merge.
+
+```tsx
+await db.mergeAsync('user', { settings: { darkMode: true } });
+```
+
+#### Conditional Writes
+
+#### `db.setIfNotExists(key, value)` → `boolean`
+
+Set only if key doesn't exist.
+
+```tsx
+const wasSet = db.setIfNotExists('initialized', true);
+```
+
+#### `await db.setIfNotExistsAsync(key, value)` → `boolean`
+
+Async version.
+
+```tsx
+const wasSet = await db.setIfNotExistsAsync('initialized', true);
+```
+
+#### Compare-And-Set
+
+#### `db.compareAndSet(key, expected, next)` → `boolean`
+
+Atomic CAS operation.
+
+```tsx
+const success = db.compareAndSet('counter', 5, 6);
+```
+
+#### `await db.compareAndSetAsync(key, expected, next)` → `boolean`
+
+Async CAS.
+
+```tsx
+const success = await db.compareAndSetAsync('counter', 5, 6);
+```
+
+#### Pagination & Streaming
+
+#### `async db.streamKeys()` → `AsyncGenerator<string>`
+
+Stream keys one at a time (memory-efficient for large datasets).
+
+```tsx
+for await (const key of db.streamKeys()) {
+  console.log(key);
+}
+```
+
+#### Query API
+
+#### `await db.query(options)` → `any[]`
+
+Complex queries with filter, sort, and limit.
+
+```tsx
+const results = await db.query({
+  prefix: 'user:',
+  filter: (user) => user.active,
+  sort: (a, b) => a.name.localeCompare(b.name),
+  limit: 10,
+});
+```
+
+---
+
+### Encryption & Security
+
+#### `db.setSecureMode(enable: boolean)`
+
+Enable/disable encryption for all stored data.
+
+```tsx
+db.setSecureMode(true);
+```
+
+#### Hardware Secure Enclave
+
+For extremely sensitive data (PINs, biometrics, tokens):
+
+#### `await db.setSecureItemAsync(key, value)` → `boolean`
+
+Store in hardware-backed keystore.
+
+```tsx
+await db.setSecureItemAsync('pin:user123', hashedPin);
+```
+
+#### `await db.getSecureItemAsync(key)` → `string | null`
+
+Retrieve secure item.
+
+```tsx
+const pin = await db.getSecureItemAsync('pin:user123');
+```
+
+#### `await db.deleteSecureItemAsync(key)` → `boolean`
+
+Delete secure item.
+
+```tsx
+await db.deleteSecureItemAsync('pin:user123');
+```
+
+---
+
+### Synchronization
+
+#### SyncManager
+
+Built-in offline-first sync with conflict resolution.
+
+```tsx
+import { TurboDB, SyncManager } from 'react-native-turbo-db';
+
+const db = await TurboDB.create('app');
+
+const syncManager = new SyncManager(db, {
+  pullChanges: async (lastVersion) => {
+    const response = await fetch(`/api/sync?since=${lastVersion}`);
+    return response.json();
+  },
+  pushChanges: async (changes) => {
+    const response = await fetch('/api/sync', {
+      method: 'POST',
+      body: JSON.stringify(changes),
+    });
+    return response.json();
+  },
+}, {
+  autoSync: true,
+  syncIntervalMs: 30000,
+});
+
+// Listen to sync events
+syncManager.onSyncEvent((event, data) => {
+  if (event === 'error') {
+    console.error('Sync failed:', data);
+  }
+});
+
+await syncManager.start();
+```
+
+---
+
+### Diagnostics
+
+#### `db.getStats()` → `DBStats`
+
+Get database statistics.
+
+```tsx
+const stats = db.getStats();
+console.log(stats.nodeCount, stats.fragmentationRatio);
+```
+
+#### `db.verifyHealth()` → `boolean`
+
+Verify database integrity.
+
+```tsx
+const healthy = db.verifyHealth();
+```
+
+#### `db.repair()` → `boolean`
+
+Repair database if corrupted.
+
+```tsx
+db.repair();
+```
+
+#### `db.getMetrics()` → `object`
+
+Get detailed engine metrics.
+
+```tsx
+const metrics = db.getMetrics();
+```
+
+---
+
+### Data Migration
+
+#### `await db.migrate(fromVersion, toVersion, migrationFn)`
+
+Run schema migrations.
+
+```tsx
+await db.migrate(1, 2, async (db) => {
+  // Migrate from v1 to v2
+  const users = await db.getAllKeysAsync();
+  for (const key of users) {
+    const user = await db.getAsync(key);
+    await db.setAsync(key, { ...user, version: 2 });
+  }
+});
+```
+
+---
+
+### Export / Import
+
+#### `await db.export()` → `Record<string, any>`
+
+Export all user data as a plain object.
+
+```tsx
+const data = await db.export();
+```
+
+#### `await db.import(data)`
+
+Import data from a plain object.
+
+```tsx
+await db.import({
+  user: { name: 'Alice' },
+  settings: { theme: 'dark' },
+});
+```
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        JavaScript                            │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │ TurboDB API │  │  SyncManager│  │  Secure Enclave API │ │
+│  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘ │
+└─────────┼────────────────┼───────────────────┼─────────────┘
+          │                │                    │
+          ▼                ▼                    ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    JSI (JavaScript Interface)                │
+│  Direct C++ function calls - no async bridge overhead        │
+└─────────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                        C++ Engine                            │
+│  ┌─────────────────────────────────────────────────────────┐ │
+│  │                    DBEngine                              │ │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐   │ │
+│  │  │ B+Tree Index│  │  WAL Manager │  │ CryptoContext│   │ │
+│  │  └─────────────┘  └─────────────┘  └──────────────┘   │ │
+│  └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      Storage Layer                           │
+│  ┌────���─���───────────┐    ┌────────────────────────────────┐  │
+│  │  MemoryMapped    │    │  Write-Ahead Log (WAL)         │  │
+│  │  File (mmap)     │    │  ACID transaction保障          │  │
+│  └──────────────────┘    └────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Performance Characteristics
+
+| Operation | Complexity | Notes |
+|-----------|------------|-------|
+| `get` | O(log n) | B+Tree index lookup |
+| `set` | O(log n) | Includes encryption |
+| `rangeQuery` | O(log n + k) | k = result count |
+| `getAllKeys` | O(n) | Enumerates all keys |
+
+## Comparison
+
+| Feature | TurboDB | AsyncStorage | SQLite (bridge) | MMKV |
+|---------|---------|--------------|-----------------|------|
+| Sync reads | ✅ | ❌ | ❌ | ✅ |
+| Encryption | XChaCha20-Poly1305 | ❌ | ❌ | ❌ |
+| Hardware keystore | ✅ | ❌ | ❌ | ❌ |
+| WAL logging | ✅ | ❌ | ✅ | ❌ |
+| Offline-first sync | ✅ | ❌ | ❌ | ❌ |
+| SSR support | ✅ | ❌ | ❌ | ❌ |
+| B+Tree indexing | ✅ | ❌ | ✅ | ❌ |
+
+## Platform Support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| React Native (New Arch) | ✅ Full | JSI + TurboModules |
+| React Native (Old Arch) | ⚠️ Fallback | Uses bridge |
+| iOS | ✅ Full | 15.1+ |
+| Android | ✅ Full | API 24+ (7.0) |
+| Web | ✅ Full | IndexedDB |
+| SSR (Next.js/Remix) | ✅ Full | Server-safe |
+| Node.js | ✅ Full | IndexedDB polyfill |
+
+## Troubleshooting
+
+### "Native module not found"
+
+Ensure you've rebuilt after installation:
+
+```bash
+npx react-native run-ios
+# or
+npx react-native run-android
+```
+
+Verify New Architecture is enabled:
+
+```tsx
+// android/gradle.properties
+newArchEnabled=true
+```
+
+### Slow first launch
+
+First run includes key generation (~256-bit AES). Subsequent launches are instantaneous.
+
+### Data doesn't persist after update
+
+TurboDB stores in the app's documents directory — data persists across app updates.
+
+### TypeScript errors
+
+Ensure `esModuleInterop` is enabled in your `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "esModuleInterop": true
+  }
+}
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
+
+```bash
+# Clone and install
+git clone https://github.com/ganeshjayaprakash/react-native-turbo-db.git
+cd react-native-turbo-db
+npm install
+
+# Build
+npm run prepare
+
+# Test
+npm test
+
+# Lint
+npm run lint
+```
+
+## License
 
 MIT © [Ganesh Jayaprakash](https://github.com/ganeshjayaprakash)
 
 ---
 
-Built with performance in mind. Happy coding! 🚀
+<p align="center">Built with performance in mind. 🚀</p>
