@@ -18,6 +18,7 @@
 #include "Compactor.h"
 #include "TurboDBError.h"
 #include "SyncMetadata.h"
+#include "ValueCache.h"
 
 namespace turbo_db {
 
@@ -163,6 +164,7 @@ private:
 
     size_t next_free_offset_;
     ArenaAllocator arena_;
+    ValueCache value_cache_;
     std::shared_ptr<facebook::react::CallInvoker> js_invoker_;
     bool is_secure_mode_ = true;
     bool sync_enabled_ = false;

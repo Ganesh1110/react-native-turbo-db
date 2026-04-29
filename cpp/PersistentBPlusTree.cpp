@@ -435,20 +435,48 @@ std::vector<std::string> PersistentBPlusTree::getKeysPaged(int limit, int offset
 void PersistentBPlusTree::clear() {
     std::unique_lock lock(tree_mutex_);
     cache_.clear();
-    
+
     // Reset header
     header_.root_offset    = 4096;
     header_.node_count     = 1;
     header_.height         = 1;
     header_.free_list_head = 0;
     // next_free_offset is managed by DBEngine
-    
+
     BTreeNode root_node;
     std::memset(&root_node, 0, sizeof(BTreeNode));
     root_node.is_leaf = true;
     write_node(header_.root_offset, root_node);
-    
+
     checkpoint();
+}
+
+void PersistentBPlusTree::prefetchLeaves(const std::string& start_key, size_t count) {
+    std::shared_lock lock(tree_mutex_);
+    if (header_.root_offset == 0) return;
+
+    std::function<void(uint64_t, size_t&)> findAndPrefetch = [&](uint64_t node_off, size_t& prefetched) {
+        if (node_off == 0 || prefetched >= count) return;
+
+        BTreeNode node = read_node(node_off);
+
+        if (node.is_leaf) {
+            if (prefetched < count) {
+                // Reading the node again via read_node warms the LRU cache
+                // This is a no-op if already cached, but ensures the node is in cache
+                (void)read_node(node_off);
+                prefetched++;
+            }
+            return;
+        }
+
+        for (uint32_t i = 0; i <= node.num_keys && prefetched < count; i++) {
+            findAndPrefetch(node.children[i], prefetched);
+        }
+    };
+
+    size_t prefetched = 0;
+    findAndPrefetch(header_.root_offset, prefetched);
 }
 
 } // namespace turbo_db

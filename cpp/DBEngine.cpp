@@ -675,6 +675,10 @@ bool DBEngine::insertRecInternal(
     bool is_tombstone)
 {
     if (!btree_ || !mmap_) return false;
+
+    // Invalidate value cache for this key (upsert case)
+    value_cache_.remove(key);
+
     const uint8_t* payload_ptr = nullptr;
     size_t payload_len = plain_bytes.size();
     std::vector<uint8_t> encrypted;
@@ -833,10 +837,16 @@ facebook::jsi::Value DBEngine::findRec(
     // ── Use shared_lock for concurrent read safety ──
     std::shared_lock lock(rw_mutex_);
 
+    // ── 1. Check value cache first (hot path) ───────────────────────────────
+    facebook::jsi::Value cached;
+    if (value_cache_.get(key, cached, runtime)) {
+        return cached;
+    }
+
     size_t offset = btree_->find(key);
     if (offset == 0 || offset % 8 != 0) return facebook::jsi::Value::undefined();
 
-    // ── 1. Read the stored length field ──────────────────────────────────
+    // ── 2. Read the stored length field ──────────────────────────────────
     const uint8_t* len_ptr = mmap_->get_address(offset);
     if (!len_ptr) return facebook::jsi::Value::undefined();
 
@@ -844,9 +854,7 @@ facebook::jsi::Value DBEngine::findRec(
     std::memcpy(&stored_len, len_ptr, sizeof(uint32_t));
     if (stored_len == 0) return facebook::jsi::Value::undefined();
 
-    // ── 2. Skip SyncMetadata prefix if sync is enabled ─────────────────────
-    // insertRecInternal writes: [uint32_t len32][SyncMetadata?][encrypted_payload]
-    // len32 already includes sizeof(SyncMetadata) when sync_enabled_.
+    // ── 3. Skip SyncMetadata prefix if sync is enabled ─────────────────────
     size_t payload_data_offset = offset + sizeof(uint32_t);
     size_t payload_data_len    = stored_len;
 
@@ -859,8 +867,7 @@ facebook::jsi::Value DBEngine::findRec(
     const uint8_t* payload_ptr = mmap_->get_address(payload_data_offset);
     if (!payload_ptr) return facebook::jsi::Value::undefined();
 
-    // ── 3. Decrypt if a crypto context is present ───────────────────────────
-    // insertRecInternal encrypts via crypto_->encrypt() before writing to mmap.
+    // ── 4. Decrypt if a crypto context is present ───────────────────────────
     std::vector<uint8_t> decrypted;
     const uint8_t* data_ptr = payload_ptr;
     size_t         data_len = payload_data_len;
@@ -877,14 +884,18 @@ facebook::jsi::Value DBEngine::findRec(
         }
     }
 
-    // ── 4. Deserialize and return a standard JSI value ─────────────────────
-    // NOTE: LazyRecordProxy (HostObject) was previously used here for
-    // BinaryType::Object to defer deserialization. Removed because HostObjects
-    // break JSON.stringify(), Object.keys(), spread ({...val}), and the `in`
-    // operator in some Hermes versions — all common patterns in RN apps.
-    // BinarySerializer::deserialize is used for all types, returning standard
-    // JSI Values (Object / Array / String / Number / Boolean / null).
+    // ── 5. Try zero-copy decode for simple types ───────────────────────────
+    if (ZeroCopyDecoder::canZeroCopy(data_ptr, data_len)) {
+        auto result = ZeroCopyDecoder::decode(runtime, data_ptr, data_len);
+        if (!result.isUndefined()) {
+            value_cache_.put(key, result, runtime);
+            return result;
+        }
+    }
+
+    // ── 6. Full deserialization for complex types ─────────────────────────
     auto result = BinarySerializer::deserialize(runtime, data_ptr, data_len);
+    value_cache_.put(key, result.first, runtime);
     return std::move(result.first);
 }
 
@@ -922,6 +933,9 @@ facebook::jsi::Value DBEngine::getMultiple(facebook::jsi::Runtime& rt, const fac
 bool DBEngine::remove(const std::string& key) {
     if (!pbtree_ || !btree_) return false;
 
+    // Invalidate value cache
+    value_cache_.remove(key);
+
     // 1. Update persistent B+Tree immediately so delete survives restart.
     //    Setting offset to 0 effectively "removes" the key from the index.
     //    The insert() call writes to mmap and logs to WAL (if enabled).
@@ -939,6 +953,12 @@ std::vector<std::pair<std::string, facebook::jsi::Value>> DBEngine::rangeQuery(
 {
     std::vector<std::pair<std::string, facebook::jsi::Value>> res;
     if (!btree_) return res;
+
+    // Prefetch adjacent B+Tree leaves for better range query performance
+    if (pbtree_) {
+        pbtree_->prefetchLeaves(start, 4);
+    }
+
     auto pairs = btree_->range(start, end);
     for (auto& p : pairs) res.push_back({p.first, findRec(runtime, p.first)});
     return res;

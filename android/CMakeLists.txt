@@ -21,6 +21,8 @@ add_library(react-native-turbo-db SHARED
     ../cpp/SodiumCryptoContext.cpp
     ../cpp/CachedCryptoContext.cpp
     ../cpp/LazyRecordProxy.cpp
+    ../cpp/ValueCache.cpp
+    ../cpp/Compression.cpp
     # ThreadPool.cpp removed — replaced by DBScheduler
 )
 
@@ -46,6 +48,7 @@ include_directories(
 # Find system libraries
 find_library(LOG_LIB log)
 find_library(ANDROID_LIB android)
+find_library(ZLIB_LIB z)
 
 # React Native prefab targets
 find_package(ReactAndroid REQUIRED CONFIG)
@@ -53,6 +56,7 @@ find_package(ReactAndroid REQUIRED CONFIG)
 target_link_libraries(react-native-turbo-db
     ${LOG_LIB}
     ${ANDROID_LIB}
+    ${ZLIB_LIB}
     sodium
     ReactAndroid::jsi
     ReactAndroid::reactnative

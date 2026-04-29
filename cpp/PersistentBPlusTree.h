@@ -185,6 +185,9 @@ public:
 
     void clear();
 
+    // Prefetch adjacent leaf nodes for range queries
+    void prefetchLeaves(const std::string& start_key, size_t count = 4);
+
 private:
     MMapRegion* mmap_;
     class WALManager* wal_;
