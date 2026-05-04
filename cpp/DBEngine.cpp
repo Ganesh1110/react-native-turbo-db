@@ -569,6 +569,15 @@ facebook::jsi::Value DBEngine::get(
             });
     }
 
+    if (propName == "registerEventListener") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 1,
+            [this](facebook::jsi::Runtime& rt, const facebook::jsi::Value&,
+                   const facebook::jsi::Value* args, size_t) -> facebook::jsi::Value {
+                return registerEventListener(rt, args[0]);
+            });
+    }
+
     return facebook::jsi::Value::undefined();
 }
 
@@ -619,6 +628,8 @@ std::vector<facebook::jsi::PropNameID> DBEngine::getPropertyNames(
     result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "getBlobAsync"));
     // R4: Compaction
     result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "compactAsync"));
+    // R4.1: Native Events
+    result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "registerEventListener"));
     return result;
 }
 
@@ -1428,6 +1439,8 @@ facebook::jsi::Value DBEngine::applyRemoteChangesAsync(
                     }
                 }
                 applied++;
+                // Emit native event for JS-layer live queries to re-evaluate
+                emitNativeEvent(rec.is_deleted ? "remove" : "set", rec.key);
             }
         } catch (...) {}
         resolve->call(rt2, facebook::jsi::Value(applied > 0));
@@ -2172,6 +2185,38 @@ facebook::jsi::Value DBEngine::getBlobAsync(
             resolve->call(rt2, facebook::jsi::String::createFromUtf8(rt2, b64));
         } catch (...) {
             resolve->call(rt2, facebook::jsi::Value::null());
+        }
+    });
+}
+
+// ── R4.1: Native Event Emitter ───────────────────────────────────────────────
+
+facebook::jsi::Value DBEngine::registerEventListener(
+    facebook::jsi::Runtime& runtime,
+    const facebook::jsi::Value& args)
+{
+    if (args.isObject() && args.asObject(runtime).isFunction(runtime)) {
+        auto cb = args.asObject(runtime).asFunction(runtime);
+        js_event_callback_ = std::make_shared<facebook::jsi::Function>(std::move(cb));
+        js_runtime_ = &runtime; // Cache pointer to runtime
+    }
+    return facebook::jsi::Value::undefined();
+}
+
+void DBEngine::emitNativeEvent(const std::string& type, const std::string& key) {
+    if (!js_invoker_ || !js_event_callback_ || !js_runtime_) return;
+
+    // Post callback to JS thread
+    js_invoker_->invokeAsync([this, type, key]() {
+        if (js_event_callback_ && js_runtime_) {
+            try {
+                js_event_callback_->call(*js_runtime_,
+                    facebook::jsi::String::createFromUtf8(*js_runtime_, type),
+                    facebook::jsi::String::createFromUtf8(*js_runtime_, key)
+                );
+            } catch (...) {
+                // Ignore JS execution errors in background
+            }
         }
     });
 }

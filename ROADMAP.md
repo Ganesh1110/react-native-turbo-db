@@ -154,7 +154,7 @@ R6 SQL          → Next-Gen Query Engine
 - [x] Sync engine handles conflicts (Last-Write-Wins by `updated_at`)
 - [x] Compaction actually shrinks file and remaps mmap correctly
 - [x] Offline mutations queue and replay on reconnect via `flushQueue()`
-- [ ] Native C++ event emitter for background DBWorker writes (stretch — R4.1)
+- [x] Native C++ event emitter for background DBWorker writes (stretch — R4.1)
 
 ---
 

@@ -117,6 +117,10 @@ public:
     // ── R4: Compaction ──
     facebook::jsi::Value compactAsync(facebook::jsi::Runtime& runtime);
 
+    // ── R4.1: Native Event Emitter ──
+    facebook::jsi::Value registerEventListener(facebook::jsi::Runtime& runtime,
+                                               const facebook::jsi::Value& args);
+
     // ── Sync Engine API ──
     facebook::jsi::Value getLocalChangesAsync(facebook::jsi::Runtime& runtime,
                                               const facebook::jsi::Value& args);
@@ -178,6 +182,9 @@ private:
     void initializeLogicalClock();
     void writeOpLog(uint64_t clock, const std::string& key);
 
+    // ── Native Event Emitter ──
+    void emitNativeEvent(const std::string& type, const std::string& key);
+
     mutable std::shared_mutex rw_mutex_;
     std::chrono::high_resolution_clock::time_point start_time_;
     std::unique_ptr<SecureCryptoContext> crypto_;
@@ -208,6 +215,10 @@ private:
     std::vector<std::string> tx_deletes_;                     // Track keys deleted in tx
 
     bool isTombstone(size_t offset);
+
+    // ── JS Callbacks ──
+    std::shared_ptr<facebook::jsi::Function> js_event_callback_;
+    facebook::jsi::Runtime* js_runtime_ = nullptr;
 };
 
 void installDBEngine(

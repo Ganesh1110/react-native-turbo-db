@@ -322,6 +322,16 @@ export class TurboDB {
       throw new Error(`[TurboDB] Failed to initialize storage at ${this.path}`);
     }
     this.isInitialized = true;
+
+    // R4.1: Native Event Emitter
+    const ndb = getNativeDB();
+    if (typeof ndb.registerEventListener === 'function') {
+      ndb.registerEventListener((type: 'set' | 'remove', key: string) => {
+        // We sync-fetch the value for 'set' so subscribers get the payload.
+        const val = type === 'set' ? this.get(key) : undefined;
+        this.notify(type, key, val);
+      });
+    }
   }
 
   // ── Synchronous API (fast path) ──────────────────────────────────────────
