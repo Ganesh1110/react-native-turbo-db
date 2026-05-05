@@ -689,6 +689,9 @@ bool DBEngine::deleteAll() {
     next_free_offset_ = 1024 * 1024;
     pbtree_->setNextFreeOffset(next_free_offset_);
     pbtree_->checkpoint();
+
+    emitNativeEvent("remove", ""); // Empty key denotes "everything"
+
     return true;
 }
 
@@ -739,6 +742,14 @@ bool DBEngine::commitTransaction() {
         pbtree_->checkpoint();
     }
 
+    // Emit events for all keys involved in the transaction
+    for (const auto& write : tx_writes_) {
+        emitNativeEvent("set", write.first);
+    }
+    for (const auto& key : tx_deletes_) {
+        emitNativeEvent("remove", key);
+    }
+
     // Clear transaction state
     tx_writes_.clear();
     tx_deletes_.clear();
@@ -768,91 +779,17 @@ facebook::jsi::Value DBEngine::insertRec(
     arena_.reset();
     BinarySerializer::serialize(runtime, obj, arena_);
     std::vector<uint8_t> plain(arena_.data(), arena_.data() + arena_.size());
-    bool ok = insertRecInternal(runtime, key, plain, true, false);
-    return facebook::jsi::Value(ok);
-}
-
-bool DBEngine::insertRecInternal(
-    facebook::jsi::Runtime& runtime,
-    const std::string& key,
-    const std::vector<uint8_t>& plain_bytes,
-    bool shouldCommit,
-    bool is_tombstone)
-{
-    if (!btree_ || !mmap_) return false;
-
-    // Invalidate value cache for this key (upsert case)
-    value_cache_.remove(key);
-
-    const uint8_t* payload_ptr = nullptr;
-    size_t payload_len = plain_bytes.size();
-    std::vector<uint8_t> encrypted;
-
-    if (payload_len > 0) {
-        payload_ptr = plain_bytes.data();
-        if (crypto_ && !is_tombstone) {
-            encrypted = crypto_->encrypt(plain_bytes.data(), plain_bytes.size());
-            payload_ptr = encrypted.data();
-            payload_len = encrypted.size();
-        }
-    }
-
-    next_free_offset_ = (next_free_offset_ + 7) & ~7;
-    size_t offset = next_free_offset_;
-    uint32_t len32 = static_cast<uint32_t>(payload_len);
-    if (sync_enabled_) len32 += sizeof(SyncMetadata);
-
-    SyncMetadata meta;
-    if (sync_enabled_) {
-        std::memset(&meta, 0, sizeof(SyncMetadata));
-        meta.flags = (is_tombstone ? SYNC_FLAG_TOMBSTONE : 0);
-    }
-
-    uint32_t crc32 = 0;
-    if (is_secure_mode_ && wal_) {
-        std::vector<uint8_t> full;
-        if (sync_enabled_) {
-            uint8_t* m = reinterpret_cast<uint8_t*>(&meta);
-            full.insert(full.end(), m, m + sizeof(SyncMetadata));
-        }
-        if (payload_len > 0) full.insert(full.end(), payload_ptr, payload_ptr + payload_len);
-        crc32 = wal_->calculate_crc32(full.data(), full.size());
-    }
-
-    mmap_->write(offset, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
-    if (sync_enabled_) {
-        mmap_->write(offset + sizeof(uint32_t), reinterpret_cast<const uint8_t*>(&meta), sizeof(SyncMetadata));
-        if (payload_len > 0) mmap_->write(offset + sizeof(uint32_t) + sizeof(SyncMetadata), payload_ptr, payload_len);
-    } else {
-        if (payload_len > 0) mmap_->write(offset + sizeof(uint32_t), payload_ptr, payload_len);
-    }
-    mmap_->write(offset + sizeof(uint32_t) + len32, reinterpret_cast<const uint8_t*>(&crc32), sizeof(uint32_t));
-
-    size_t total = sizeof(uint32_t) + len32 + (is_secure_mode_ ? sizeof(uint32_t) : 0);
-    next_free_offset_ += (total + 7) & ~7;
+    bool ok = false;
+    try {
+        std::unique_lock<std::shared_mutex> lock(rw_mutex_);
+        ok = insertRecBytes(key, plain, true, false);
+    } catch (...) {}
     
-    // ── Transaction-aware: defer pbtree_ write if in transaction ──
-    if (in_transaction_) {
-        // Track this write for later commit
-        tx_writes_.push_back({key, offset});
-        // Still update BufferedBTree for same-session reads
-        btree_->insert(key, offset);
-        return true;
+    if (ok) {
+        emitNativeEvent("set", key);
     }
-
-    if (pbtree_) {
-        pbtree_->setNextFreeOffset(next_free_offset_);
-        // Write the key→offset mapping directly to the persistent B+Tree so it
-        // is durable even if the app is killed before BufferedBTree's background
-        // worker reaches BATCH_SIZE. pbtree_->insert() is WAL-logged and calls
-        // checkpoint(), ensuring the header is also updated atomically.
-        pbtree_->insert(key, offset, shouldCommit);
-    }
-    // Also update the in-memory BufferedBTree buffer for fast same-session reads.
-    // The background worker will call pbtree_->insert() again later, which is
-    // safe because it is an idempotent upsert (same key, same offset).
-    btree_->insert(key, offset);
-    return true;
+    
+    return facebook::jsi::Value(ok);
 }
 
 bool DBEngine::insertRecBytes(
@@ -922,6 +859,16 @@ bool DBEngine::insertRecBytes(
     // ── R4: Track live bytes for compaction heuristic ──────────────────────
     if (compactor_ && !is_tombstone) {
         compactor_->trackLiveBytes((total + 7) & ~7, true);
+    }
+
+    // ── Transaction-aware: defer pbtree_ write if in transaction ──
+    if (in_transaction_) {
+        // Track this write for later commit
+        tx_writes_.push_back({key, offset});
+        // Still update BufferedBTree for same-session reads
+        btree_->insert(key, offset);
+        if (outOffset) *outOffset = offset;
+        return true;
     }
 
     if (pbtree_) {
@@ -1015,16 +962,33 @@ facebook::jsi::Value DBEngine::setMulti(facebook::jsi::Runtime& rt, const facebo
     auto obj = entries.asObject(rt);
     auto propNames = obj.getPropertyNames(rt);
     size_t len = propNames.size(rt);
-    for (size_t i = 0; i < len; i++) {
-        auto propName = propNames.getValueAtIndex(rt, i).asString(rt).utf8(rt);
-        auto val = obj.getProperty(rt, propName.c_str());
-        arena_.reset();
-        BinarySerializer::serialize(rt, val, arena_);
-        std::vector<uint8_t> plain(arena_.data(), arena_.data() + arena_.size());
-        insertRecInternal(rt, propName, plain, false, false);
+    
+    std::vector<std::string> keys;
+    keys.reserve(len);
+
+    bool ok = false;
+    try {
+        std::unique_lock<std::shared_mutex> lock(rw_mutex_);
+        for (size_t i = 0; i < len; i++) {
+            auto propName = propNames.getValueAtIndex(rt, i).asString(rt).utf8(rt);
+            auto val = obj.getProperty(rt, propName.c_str());
+            arena_.reset();
+            BinarySerializer::serialize(rt, val, arena_);
+            std::vector<uint8_t> plain(arena_.data(), arena_.data() + arena_.size());
+            insertRecBytes(propName, plain, false, false);
+            keys.push_back(propName);
+        }
+        if (pbtree_) pbtree_->checkpoint();
+        ok = true;
+    } catch (...) {}
+    
+    if (ok) {
+        for (const auto& k : keys) {
+            emitNativeEvent("set", k);
+        }
     }
-    if (pbtree_) pbtree_->checkpoint();
-    return facebook::jsi::Value(true);
+    
+    return facebook::jsi::Value(ok);
 }
 
 facebook::jsi::Value DBEngine::getMultiple(facebook::jsi::Runtime& rt, const facebook::jsi::Value& keys) {
@@ -1043,34 +1007,51 @@ facebook::jsi::Value DBEngine::getMultiple(facebook::jsi::Runtime& rt, const fac
 bool DBEngine::remove(const std::string& key) {
     if (!pbtree_ || !btree_) return false;
 
-    // Invalidate value cache
-    value_cache_.remove(key);
+    bool success = false;
+    {
+        std::unique_lock<std::shared_mutex> lock(rw_mutex_);
+        // Invalidate value cache
+        value_cache_.remove(key);
 
-    // ── R4: Account for reclaimed space in fragmentation tracking ───────────
-    // Read the record size at the current offset before tombstoning it.
-    if (compactor_) {
-        size_t old_offset = btree_->find(key);
-        if (old_offset != 0) {
-            const uint8_t* len_ptr = mmap_ ? mmap_->get_address(old_offset) : nullptr;
-            if (len_ptr) {
-                uint32_t rec_len = 0;
-                std::memcpy(&rec_len, len_ptr, sizeof(uint32_t));
-                size_t total = sizeof(uint32_t) + rec_len + (is_secure_mode_ ? sizeof(uint32_t) : 0);
-                compactor_->trackLiveBytes((total + 7) & ~7, false); // subtract
+        // ── R4: Account for reclaimed space in fragmentation tracking ───────────
+        // Read the record size at the current offset before tombstoning it.
+        if (compactor_) {
+            size_t old_offset = btree_->find(key);
+            if (old_offset != 0) {
+                const uint8_t* len_ptr = mmap_ ? mmap_->get_address(old_offset) : nullptr;
+                if (len_ptr) {
+                    uint32_t rec_len = 0;
+                    std::memcpy(&rec_len, len_ptr, sizeof(uint32_t));
+                    size_t total = sizeof(uint32_t) + rec_len + (is_secure_mode_ ? sizeof(uint32_t) : 0);
+                    compactor_->trackLiveBytes((total + 7) & ~7, false); // subtract
+                }
             }
+        }
+
+        // ── Transaction-aware: defer pbtree_ write if in transaction ──
+        if (in_transaction_) {
+            tx_deletes_.push_back(key);
+            btree_->insert(key, 0);
+            success = true;
+        } else {
+            // 1. Update persistent B+Tree immediately so delete survives restart.
+            //    Setting offset to 0 effectively "removes" the key from the index.
+            //    The insert() call writes to mmap and logs to WAL (if enabled).
+            pbtree_->insert(key, 0, true);  // shouldCheckpoint = true
+
+            // 2. Update in-memory buffer for fast same-session reads.
+            //    BufferedBTree::find() returns 0 for offset=0, so findRec() returns undefined.
+            btree_->insert(key, 0);
+
+            success = true;
         }
     }
 
-    // 1. Update persistent B+Tree immediately so delete survives restart.
-    //    Setting offset to 0 effectively "removes" the key from the index.
-    //    The insert() call writes to mmap and logs to WAL (if enabled).
-    pbtree_->insert(key, 0, true);  // shouldCheckpoint = true
+    if (success) {
+        emitNativeEvent("remove", key);
+    }
 
-    // 2. Update in-memory buffer for fast same-session reads.
-    //    BufferedBTree::find() returns 0 for offset=0, so findRec() returns undefined.
-    btree_->insert(key, 0);
-
-    return true;
+    return success;
 }
 
 std::vector<std::pair<std::string, facebook::jsi::Value>> DBEngine::rangeQuery(
@@ -1118,24 +1099,27 @@ facebook::jsi::Value DBEngine::setAsync(facebook::jsi::Runtime& rt, const facebo
     BinarySerializer::serialize(rt, obj.getProperty(rt, "value"), arena_);
     std::vector<uint8_t> bytes(arena_.data(), arena_.data() + arena_.size());
 
-    return createPromise(rt, [this, key, bytes](auto& rt2, auto resolve, auto reject) mutable {
-        scheduler_->schedule([this, key, bytes = std::move(bytes), resolve, reject]() mutable {
+    return createPromise(rt, [this, key, bytes = std::move(bytes)](auto& rt2, auto resolve, auto reject) mutable {
+        auto* rt_ptr = &rt2;
+        scheduler_->schedule([this, key, bytes = std::move(bytes), resolve, rt_ptr]() mutable {
             bool ok = false;
             try {
                 std::unique_lock<std::shared_mutex> lock(rw_mutex_);
                 ok = insertRecBytes(key, bytes, true, false);
             } catch (...) { ok = false; }
+            
+            if (ok) {
+                emitNativeEvent("set", key);
+            }
+
             if (js_invoker_) {
-                js_invoker_->invokeAsync([resolve, ok]() mutable {
-                    // TODO: call resolve->call(rt, jsi::Value(ok)) once rt is safely
-                    // accessible on the JS thread. For now, we resolve synchronously below.
-                    (void)ok; // suppress unused-capture: ok will be used when rt bridging is wired
+                js_invoker_->invokeAsync([rt_ptr, resolve, ok]() mutable {
+                    try {
+                        resolve->call(*rt_ptr, facebook::jsi::Value(ok));
+                    } catch (...) {}
                 });
             }
         }, DBScheduler::Priority::WRITE);
-        // Resolve synchronously as fallback for now — the scheduler above is fire-and-forget.
-        // A future improvement: store resolve/reject as shared_ptr and call from invokeAsync.
-        resolve->call(rt2, facebook::jsi::Value(true));
     });
 }
 
@@ -1170,9 +1154,22 @@ facebook::jsi::Value DBEngine::removeAsync(facebook::jsi::Runtime& rt, const fac
         });
     }
     std::string key = keyVal.asString(rt).utf8(rt);
-    bool ok = remove(key);
-    return createPromise(rt, [ok](auto& rt2, auto resolve, auto reject) {
-        resolve->call(rt2, facebook::jsi::Value(ok));
+    return createPromise(rt, [this, key](auto& rt2, auto resolve, auto reject) {
+        auto* rt_ptr = &rt2;
+        scheduler_->schedule([this, key, resolve, rt_ptr]() mutable {
+            bool ok = false;
+            try {
+                ok = remove(key);
+            } catch (...) { ok = false; }
+            
+            if (js_invoker_) {
+                js_invoker_->invokeAsync([rt_ptr, resolve, ok]() mutable {
+                    try {
+                        resolve->call(*rt_ptr, facebook::jsi::Value(ok));
+                    } catch (...) {}
+                });
+            }
+        }, DBScheduler::Priority::WRITE);
     });
 }
 
@@ -1196,15 +1193,33 @@ facebook::jsi::Value DBEngine::setMultiAsync(facebook::jsi::Runtime& rt, const f
         batch.push_back({propName, std::vector<uint8_t>(arena_.data(), arena_.data() + arena_.size())});
     }
     // Schedule the actual I/O on worker thread
-    scheduler_->schedule([this, batch = std::move(batch)]() mutable {
-        std::unique_lock<std::shared_mutex> lock(rw_mutex_);
-        for (auto& [key, bytes] : batch) {
-            insertRecBytes(key, bytes, false, false);
-        }
-        if (pbtree_) pbtree_->checkpoint();
-    }, DBScheduler::Priority::WRITE);
-    return createPromise(rt, [](auto& rt2, auto resolve, auto reject) {
-        resolve->call(rt2, facebook::jsi::Value(true));
+    return createPromise(rt, [this, batch = std::move(batch)](auto& rt2, auto resolve, auto reject) mutable {
+        auto* rt_ptr = &rt2;
+        scheduler_->schedule([this, batch = std::move(batch), resolve, rt_ptr]() mutable {
+            bool ok = false;
+            try {
+                std::unique_lock<std::shared_mutex> lock(rw_mutex_);
+                for (auto& [key, bytes] : batch) {
+                    insertRecBytes(key, bytes, false, false);
+                }
+                if (pbtree_) pbtree_->checkpoint();
+                ok = true;
+            } catch (...) { ok = false; }
+            
+            if (ok) {
+                for (auto& [key, _] : batch) {
+                    emitNativeEvent("set", key);
+                }
+            }
+
+            if (js_invoker_) {
+                js_invoker_->invokeAsync([rt_ptr, resolve, ok]() mutable {
+                    try {
+                        resolve->call(*rt_ptr, facebook::jsi::Value(ok));
+                    } catch (...) {}
+                });
+            }
+        }, DBScheduler::Priority::WRITE);
     });
 }
 
@@ -1828,88 +1843,111 @@ facebook::jsi::Value DBEngine::setWithTTLAsync(
             std::chrono::system_clock::now().time_since_epoch()).count()
         + static_cast<int64_t>(ttlMs));
 
-    return createPromise(rt, [this, key, bytes, expiry_ms](auto& rt2, auto resolve, auto reject) {
-        bool ok = false;
-        try {
-            std::unique_lock<std::shared_mutex> lock(rw_mutex_);
-            // 1. Write the user value
-            ok = insertRecBytes(key, bytes, true, false);
+    return createPromise(rt, [this, key, bytes = std::move(bytes), expiry_ms](auto& rt2, auto resolve, auto reject) mutable {
+        auto* rt_ptr = &rt2;
+        scheduler_->schedule([this, key, bytes = std::move(bytes), expiry_ms, resolve, rt_ptr]() mutable {
+            bool ok = false;
+            try {
+                std::unique_lock<std::shared_mutex> lock(rw_mutex_);
+                // 1. Write the user value
+                ok = insertRecBytes(key, bytes, true, false);
+                if (ok) {
+                    // 2. Write TTL sidecar: "__ttl:<key>" → little-endian uint64
+                    std::string ttl_key = std::string(TTL_PREFIX) + key;
+                    std::vector<uint8_t> ttl_bytes(sizeof(uint64_t));
+                    std::memcpy(ttl_bytes.data(), &expiry_ms, sizeof(uint64_t));
+                    insertRecBytes(ttl_key, ttl_bytes, true, false);
+                }
+            } catch (...) { ok = false; }
+            
             if (ok) {
-                // 2. Write TTL sidecar: "__ttl:<key>" → little-endian uint64
-                std::string ttl_key = std::string(TTL_PREFIX) + key;
-                std::vector<uint8_t> ttl_bytes(sizeof(uint64_t));
-                std::memcpy(ttl_bytes.data(), &expiry_ms, sizeof(uint64_t));
-                insertRecBytes(ttl_key, ttl_bytes, true, false);
+                emitNativeEvent("set", key);
             }
-        } catch (...) { ok = false; }
-        resolve->call(rt2, facebook::jsi::Value(ok));
+
+            if (js_invoker_) {
+                js_invoker_->invokeAsync([rt_ptr, resolve, ok]() mutable {
+                    try {
+                        resolve->call(*rt_ptr, facebook::jsi::Value(ok));
+                    } catch (...) {}
+                });
+            }
+        }, DBScheduler::Priority::WRITE);
     });
 }
 
 facebook::jsi::Value DBEngine::cleanupExpiredAsync(facebook::jsi::Runtime& rt) {
     return createPromise(rt, [this](auto& rt2, auto resolve, auto) {
-        uint64_t now_ms = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
+        auto* rt_ptr = &rt2;
+        scheduler_->schedule([this, resolve, rt_ptr]() mutable {
+            uint64_t now_ms = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
 
-        int cleaned = 0;
-        try {
-            // Find all TTL sidecar keys
-            std::vector<std::string> all_keys;
-            {
-                std::shared_lock<std::shared_mutex> lock(rw_mutex_);
-                all_keys = btree_ ? btree_->getAllKeys() : std::vector<std::string>();
-            }
-            std::string ttl_prefix = std::string(TTL_PREFIX);
-            for (const auto& k : all_keys) {
-                if (k.compare(0, ttl_prefix.size(), ttl_prefix) != 0) continue;
-                // This is a sidecar key
-                std::string user_key = k.substr(ttl_prefix.size());
-                // Read expiry
-                size_t sidecar_offset;
+            int cleaned = 0;
+            try {
+                // Find all TTL sidecar keys
+                std::vector<std::string> all_keys;
                 {
                     std::shared_lock<std::shared_mutex> lock(rw_mutex_);
-                    sidecar_offset = btree_ ? btree_->find(k) : 0;
+                    all_keys = btree_ ? btree_->getAllKeys() : std::vector<std::string>();
                 }
-                if (sidecar_offset == 0) continue;
+                std::string ttl_prefix = std::string(TTL_PREFIX);
+                for (const auto& k : all_keys) {
+                    if (k.compare(0, ttl_prefix.size(), ttl_prefix) != 0) continue;
+                    // This is a sidecar key
+                    std::string user_key = k.substr(ttl_prefix.size());
+                    // Read expiry
+                    size_t sidecar_offset;
+                    {
+                        std::shared_lock<std::shared_mutex> lock(rw_mutex_);
+                        sidecar_offset = btree_ ? btree_->find(k) : 0;
+                    }
+                    if (sidecar_offset == 0) continue;
 
-                const uint8_t* len_ptr = mmap_->get_address(sidecar_offset);
-                if (!len_ptr) continue;
-                uint32_t stored_len;
-                std::memcpy(&stored_len, len_ptr, sizeof(uint32_t));
-                if (stored_len < sizeof(uint64_t)) continue;
+                    const uint8_t* len_ptr = mmap_->get_address(sidecar_offset);
+                    if (!len_ptr) continue;
+                    uint32_t stored_len;
+                    std::memcpy(&stored_len, len_ptr, sizeof(uint32_t));
+                    if (stored_len < sizeof(uint64_t)) continue;
 
-                const uint8_t* payload_ptr = mmap_->get_address(sidecar_offset + sizeof(uint32_t));
-                if (!payload_ptr) continue;
+                    const uint8_t* payload_ptr = mmap_->get_address(sidecar_offset + sizeof(uint32_t));
+                    if (!payload_ptr) continue;
 
-                // Decrypt if needed
-                std::vector<uint8_t> plain;
-                const uint8_t* data_ptr = payload_ptr;
-                size_t data_len = stored_len;
-                if (crypto_) {
+                    // Decrypt if needed
+                    std::vector<uint8_t> plain;
+                    const uint8_t* data_ptr = payload_ptr;
+                    size_t data_len = stored_len;
+                    if (crypto_) {
+                        try {
+                            plain = crypto_->decrypt(payload_ptr, stored_len);
+                            if (plain.size() < sizeof(uint64_t)) continue;
+                            data_ptr = plain.data();
+                            data_len = plain.size();
+                        } catch (...) { continue; }
+                    }
+                    if (data_len < sizeof(uint64_t)) continue;
+
+                    uint64_t expiry_ms;
+                    std::memcpy(&expiry_ms, data_ptr, sizeof(uint64_t));
+
+                    if (now_ms > expiry_ms) {
+                        // Expired: remove both user key and sidecar
+                        // remove() will handle locks and emit events
+                        remove(user_key);
+                        remove(k);
+                        cleaned++;
+                    }
+                }
+            } catch (...) {}
+            
+            if (js_invoker_) {
+                js_invoker_->invokeAsync([rt_ptr, resolve, cleaned]() mutable {
                     try {
-                        plain = crypto_->decrypt(payload_ptr, stored_len);
-                        if (plain.size() < sizeof(uint64_t)) continue;
-                        data_ptr = plain.data();
-                        data_len = plain.size();
-                    } catch (...) { continue; }
-                }
-                if (data_len < sizeof(uint64_t)) continue;
-
-                uint64_t expiry_ms;
-                std::memcpy(&expiry_ms, data_ptr, sizeof(uint64_t));
-
-                if (now_ms > expiry_ms) {
-                    // Expired: remove both user key and sidecar
-                    std::unique_lock<std::shared_mutex> lock(rw_mutex_);
-                    remove(user_key);
-                    remove(k);
-                    value_cache_.remove(user_key);
-                    cleaned++;
-                }
+                        resolve->call(*rt_ptr, facebook::jsi::Value(static_cast<double>(cleaned)));
+                    } catch (...) {}
+                });
             }
-        } catch (...) {}
-        resolve->call(rt2, facebook::jsi::Value(static_cast<double>(cleaned)));
+        }, DBScheduler::Priority::WRITE);
     });
 }
 
@@ -2073,15 +2111,33 @@ facebook::jsi::Value DBEngine::importDBAsync(
     }
 
     return createPromise(rt, [this, batch = std::move(batch)](auto& rt2, auto resolve, auto) mutable {
-        int imported = 0;
-        try {
-            std::unique_lock<std::shared_mutex> lock(rw_mutex_);
-            for (auto& [key, bytes] : batch) {
-                if (insertRecBytes(key, bytes, false, false)) imported++;
+        auto* rt_ptr = &rt2;
+        scheduler_->schedule([this, batch = std::move(batch), resolve, rt_ptr]() mutable {
+            int imported = 0;
+            try {
+                std::unique_lock<std::shared_mutex> lock(rw_mutex_);
+                for (auto& [key, bytes] : batch) {
+                    if (insertRecBytes(key, bytes, false, false)) {
+                        imported++;
+                    }
+                }
+                if (pbtree_) pbtree_->checkpoint();
+            } catch (...) {}
+            
+            if (imported > 0) {
+                for (auto& [key, _] : batch) {
+                    emitNativeEvent("set", key);
+                }
             }
-            if (pbtree_) pbtree_->checkpoint();
-        } catch (...) {}
-        resolve->call(rt2, facebook::jsi::Value(static_cast<double>(imported)));
+
+            if (js_invoker_) {
+                js_invoker_->invokeAsync([rt_ptr, resolve, imported]() mutable {
+                    try {
+                        resolve->call(*rt_ptr, facebook::jsi::Value(static_cast<double>(imported)));
+                    } catch (...) {}
+                });
+            }
+        }, DBScheduler::Priority::WRITE);
     });
 }
 
@@ -2116,12 +2172,26 @@ facebook::jsi::Value DBEngine::setBlobAsync(
     bytes.insert(bytes.end(), raw.begin(), raw.end());
 
     return createPromise(rt, [this, key, bytes = std::move(bytes)](auto& rt2, auto resolve, auto reject) mutable {
-        bool ok = false;
-        try {
-            std::unique_lock<std::shared_mutex> lock(rw_mutex_);
-            ok = insertRecBytes(key, bytes, true, false);
-        } catch (...) {}
-        resolve->call(rt2, facebook::jsi::Value(ok));
+        auto* rt_ptr = &rt2;
+        scheduler_->schedule([this, key, bytes = std::move(bytes), resolve, rt_ptr]() mutable {
+            bool ok = false;
+            try {
+                std::unique_lock<std::shared_mutex> lock(rw_mutex_);
+                ok = insertRecBytes(key, bytes, true, false);
+            } catch (...) { ok = false; }
+            
+            if (ok) {
+                emitNativeEvent("set", key);
+            }
+
+            if (js_invoker_) {
+                js_invoker_->invokeAsync([rt_ptr, resolve, ok]() mutable {
+                    try {
+                        resolve->call(*rt_ptr, facebook::jsi::Value(ok));
+                    } catch (...) {}
+                });
+            }
+        }, DBScheduler::Priority::WRITE);
     });
 }
 

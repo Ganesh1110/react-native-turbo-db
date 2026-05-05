@@ -157,13 +157,6 @@ private:
             std::shared_ptr<facebook::jsi::Function> resolve,
             std::shared_ptr<facebook::jsi::Function> reject)> executor);
 
-    // Core insert (must be called on DBWorker or under unique_lock)
-    bool insertRecInternal(facebook::jsi::Runtime& runtime,
-                            const std::string& key,
-                            const std::vector<uint8_t>& plain_bytes,
-                            bool shouldCommit,
-                            bool is_tombstone);
-
     // Byte-level insert called from async path (no jsi::Runtime needed)
     // If outOffset is provided, returns the offset where data was written
     bool insertRecBytes(const std::string& key,

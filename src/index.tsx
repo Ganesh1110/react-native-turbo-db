@@ -485,7 +485,8 @@ export class TurboDB {
     const unsub = this.subscribeAll((event) => {
       if (event.type === 'set' || event.type === 'remove') {
         // Only re-query if the changed key is within the watched prefix
-        if (event.key.startsWith(prefix) || prefix === '') {
+        // An empty key (event.key === '') indicates a full database change (e.g. deleteAll)
+        if (event.key === '' || event.key.startsWith(prefix) || prefix === '') {
           schedule();
         }
       }
@@ -624,7 +625,6 @@ export class TurboDB {
           );
         }
       });
-      this.notify('set', key, value);
     }
     return success;
   }
@@ -694,7 +694,6 @@ export class TurboDB {
   ): Promise<boolean> {
     this.ensureInitialized();
     const success = await getNativeDB().setWithTTLAsync({ key, value, ttlMs });
-    if (success) this.notify('set', key, value);
     return success;
   }
 
@@ -722,9 +721,6 @@ export class TurboDB {
   setMulti(entries: Record<string, any>): boolean {
     this.ensureInitialized();
     const success = getNativeDB().setMulti(entries);
-    if (success) {
-      Object.entries(entries).forEach(([k, v]) => this.notify('set', k, v));
-    }
     return success;
   }
 
@@ -741,9 +737,6 @@ export class TurboDB {
   remove(key: string): boolean {
     this.ensureInitialized();
     const success = getNativeDB().remove(key);
-    if (success) {
-      this.notify('remove', key);
-    }
     return success;
   }
 
@@ -1043,7 +1036,6 @@ export class TurboDB {
           );
         }
       });
-      this.notify('set', key, value);
     }
     return success;
   }
@@ -1083,7 +1075,6 @@ export class TurboDB {
             );
           }
         });
-        this.notify('set', k, v);
       });
     }
     return success;
@@ -1128,9 +1119,6 @@ export class TurboDB {
   async removeAsync(key: string): Promise<boolean> {
     this.ensureInitialized();
     const success = await getNativeDB().removeAsync(key);
-    if (success) {
-      this.notify('remove', key);
-    }
     return success;
   }
 
