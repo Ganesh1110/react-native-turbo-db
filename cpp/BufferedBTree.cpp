@@ -22,6 +22,8 @@ BufferedBTree::~BufferedBTree() {
 void BufferedBTree::insert(const std::string& key, size_t data_offset) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     
+    if (!tree_) return;
+    
     // Check main buffer
     bool found = false;
     for (auto& op : write_buffer_) {
@@ -99,6 +101,7 @@ size_t BufferedBTree::find(const std::string& key) {
     }
     
     // 3. Fallback to disk tree
+    if (!tree_) return 0;
     return tree_->find(key);
 }
 
@@ -110,6 +113,8 @@ void BufferedBTree::flush() {
 
 std::vector<std::string> BufferedBTree::getAllKeys() {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
+    
+    if (!tree_) return {};
     
     // Use a map to keep track of the latest offset for each key
     std::map<std::string, size_t> key_map;
@@ -143,6 +148,8 @@ std::vector<std::string> BufferedBTree::getAllKeys() {
 
 std::vector<std::pair<std::string, size_t>> BufferedBTree::range(const std::string& start_key, const std::string& end_key) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
+    
+    if (!tree_) return {};
     
     // Use a map for merging and sorting
     std::map<std::string, size_t> key_map;
@@ -189,6 +196,8 @@ void BufferedBTree::clear() {
 
 std::vector<std::pair<std::string, size_t>> BufferedBTree::prefixSearch(const std::string& prefix) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
+
+    if (!tree_) return {};
 
     // Use a map so the in-buffer (newer) values override stale disk values
     std::map<std::string, size_t> key_map;
