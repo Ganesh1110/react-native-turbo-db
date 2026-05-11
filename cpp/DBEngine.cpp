@@ -4,6 +4,7 @@
 #include "SyncMetadata.h"
 #include "LazyRecordProxy.h"
 #include "HMACProvider.h"
+#include "SodiumCryptoContext.h"
 #include <chrono>
 #include <iostream>
 #include <iomanip>
