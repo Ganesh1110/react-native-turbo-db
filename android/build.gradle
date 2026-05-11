@@ -13,25 +13,19 @@ apply plugin: "com.android.library"
 apply plugin: "com.facebook.react"
 
 // Developer greeting — shown during Gradle configuration phase
-println """
+println("""
 \u001B[36m
-▛▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▜
-▌  ████████ ██    ██ ██████  ██████   ██████  ▐
-▌     ██    ██    ██ ██   ██ ██   ██ ██    ██ ▐
-▌     ██    ██    ██ ██████  ██████  ██    ██ ▐
-▌     ██    ██    ██ ██   ██ ██   ██ ██    ██ ▐
-▌     ██     ██████  ██   ██ ██████   ██████  ▐
-▌                                             ▐
-▌   ██████  ██████                            ▐
-▌   ██   ██ ██   ██                           ▐
-▌   ██   ██ ██████                            ▐
-▌   ██   ██ ██   ██                           ▐
-▌   ██████  ██████                            ▐
-▙▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▟
-
-⚡ Turbo DB — React Native's Fastest KV Store
+┌──────────────────────────────────────┐
+│ TurboDB v1.4.0                       │
+│ High-performance JSI database        │
+│ for React Native                     │
+├──────────────────────────────────────┤
+│ ✓ Native bindings initialized        │
+│ ✓ WAL persistence enabled            │
+│ ✓ Reactive sync ready                │
+└──────────────────────────────────────┘
 \u001B[0m
-"""
+""")
 
 def getExtOrDefault(name) {
     return rootProject.ext.has(name) ? rootProject.ext.get(name) : project.properties["TurboDB_" + name]

@@ -101,6 +101,16 @@ declare const global: {
     getBlobAsync(key: string): Promise<string | null>;
     // ── R4: Compaction ──
     compactAsync(): Promise<boolean>;
+    // ── R4.1: Native Events ──
+    registerEventListener(callback: (type: string, key: string) => void): void;
+    // ── R5: Security & Enterprise ──
+    rotateEncryptionKeyAsync(args: { newKey: string }): Promise<boolean>;
+    setSelectiveEncryptAsync(args: {
+      key: string;
+      value: any;
+      encrypt: boolean;
+    }): Promise<boolean>;
+    enableHMACMode(enable: boolean): void;
   };
   __NativeDB: any;
 };
@@ -1366,18 +1376,91 @@ export class TurboDB {
     };
   }
 
+  // ── R5: Security & Enterprise ─────────────────────────────────────────────
+
   /**
    * Rotate the active encryption key.
    *
-   * @throws {TurboDBError} with code NOT_SUPPORTED — not yet implemented.
-   * Key rotation is managed by the native libsodium layer at initialization time.
-   * This API is reserved for a future native key-rotation binding.
+   * Re-encrypts every record in the database with the new key on a background
+   * worker thread. During rotation the database is exclusively locked — reads
+   * and writes will queue behind the operation. The returned Promise resolves
+   * `true` once all records have been re-encrypted and the WAL is synced to disk.
+   *
+   * > [!IMPORTANT]
+   * > After rotation, the new key becomes the active decryption key for all
+   * > subsequent reads. Store the new key securely (e.g. via `setSecureItemAsync`).
+   *
+   * @param newKey  New encryption key material (any string).
+   * @returns       `true` on success, `false` on failure.
    */
-  async setEncryptionKey(_key: string): Promise<void> {
-    throw new TurboDBError(
-      TurboDBErrorCode.NOT_SUPPORTED,
-      'setEncryptionKey is not yet implemented. Key rotation is managed by the native libsodium layer at init time.'
-    );
+  async setEncryptionKey(newKey: string): Promise<void> {
+    this.ensureInitialized();
+    const ok = await getNativeDB().rotateEncryptionKeyAsync({ newKey });
+    if (!ok) {
+      throw new TurboDBError(
+        TurboDBErrorCode.INTERNAL_ERROR,
+        'setEncryptionKey: key rotation failed — check native logs for details'
+      );
+    }
+  }
+
+  /**
+   * Rotate the active encryption key (explicit async form).
+   * Alias for `setEncryptionKey()` with a boolean return value.
+   *
+   * @param newKey  New encryption key material.
+   * @returns       `true` if rotation succeeded.
+   */
+  async rotateEncryptionKey(newKey: string): Promise<boolean> {
+    this.ensureInitialized();
+    return getNativeDB().rotateEncryptionKeyAsync({ newKey });
+  }
+
+  /**
+   * Store a value with explicit per-record encryption control.
+   *
+   * Useful for mixed workloads where some data (e.g. public configuration) does
+   * not need encryption overhead while other data remains protected.
+   *
+   * @param key      The user-facing key.
+   * @param value    The value to store.
+   * @param options  `{ encrypt: false }` to bypass the crypto layer for this record.
+   *                 Defaults to `encrypt: true` (same as `setAsync`).
+   * @returns        `true` if the write succeeded.
+   */
+  async setSelectiveEncrypt(
+    key: string,
+    value: any,
+    options: { encrypt?: boolean } = {}
+  ): Promise<boolean> {
+    this.ensureInitialized();
+    return getNativeDB().setSelectiveEncryptAsync({
+      key,
+      value,
+      encrypt: options.encrypt !== false, // default true
+    });
+  }
+
+  /**
+   * Enable or disable HMAC-SHA256 per-record integrity tagging.
+   *
+   * When enabled, each record is tagged with a 32-byte HMAC-SHA256 that is
+   * verified on read. This provides **tamper detection** (in addition to the
+   * accidental-corruption detection provided by the default CRC32).
+   *
+   * Requires secure mode to be active (`setSecureMode(true)`).
+   * Has no effect in non-secure mode.
+   *
+   * > [!WARNING]
+   * > Enabling HMAC mode changes the on-disk record format. Records written
+   * > in HMAC mode cannot be read by older versions of the library that expect
+   * > 4-byte CRC32 tags.
+   *
+   * @param enable  `true` to activate HMAC-SHA256, `false` to revert to CRC32.
+   */
+  enableHMACMode(enable: boolean): void {
+    this.ensureInitialized();
+    getNativeDB().enableHMACMode(enable);
   }
 
   /**

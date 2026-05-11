@@ -23,6 +23,7 @@ add_library(react-native-turbo-db SHARED
     ../cpp/LazyRecordProxy.cpp
     ../cpp/ValueCache.cpp
     ../cpp/Compression.cpp
+    ../cpp/HMACProvider.cpp
     # ThreadPool.cpp removed — replaced by DBScheduler
 )
 

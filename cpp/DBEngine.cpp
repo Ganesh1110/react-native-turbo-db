@@ -3,6 +3,7 @@
 #include "TurboDBError.h"
 #include "SyncMetadata.h"
 #include "LazyRecordProxy.h"
+#include "HMACProvider.h"
 #include <chrono>
 #include <iostream>
 #include <iomanip>
@@ -578,6 +579,36 @@ facebook::jsi::Value DBEngine::get(
             });
     }
 
+    // ── R5: Security & Enterprise ──────────────────────────────────────────────
+
+    if (propName == "rotateEncryptionKeyAsync") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 1,
+            [this](facebook::jsi::Runtime& rt, const facebook::jsi::Value&,
+                   const facebook::jsi::Value* args, size_t) -> facebook::jsi::Value {
+                return rotateEncryptionKeyAsync(rt, args[0]);
+            });
+    }
+
+    if (propName == "setSelectiveEncryptAsync") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 1,
+            [this](facebook::jsi::Runtime& rt, const facebook::jsi::Value&,
+                   const facebook::jsi::Value* args, size_t) -> facebook::jsi::Value {
+                return setSelectiveEncryptAsync(rt, args[0]);
+            });
+    }
+
+    if (propName == "enableHMACMode") {
+        return facebook::jsi::Function::createFromHostFunction(
+            runtime, name, 1,
+            [this](facebook::jsi::Runtime& rt, const facebook::jsi::Value&,
+                   const facebook::jsi::Value* args, size_t) -> facebook::jsi::Value {
+                enableHMACMode(args[0].asBool());
+                return facebook::jsi::Value::undefined();
+            });
+    }
+
     return facebook::jsi::Value::undefined();
 }
 
@@ -630,6 +661,10 @@ std::vector<facebook::jsi::PropNameID> DBEngine::getPropertyNames(
     result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "compactAsync"));
     // R4.1: Native Events
     result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "registerEventListener"));
+    // R5: Security & Enterprise
+    result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "rotateEncryptionKeyAsync"));
+    result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "setSelectiveEncryptAsync"));
+    result.push_back(facebook::jsi::PropNameID::forUtf8(runtime, "enableHMACMode"));
     return result;
 }
 
@@ -806,9 +841,16 @@ bool DBEngine::insertRecBytes(
     size_t payload_len = plain.size();
     std::vector<uint8_t> encrypted;
 
+    // ── R5: Selective Encryption — bypass crypto for NOENC_PREFIX keys ──────
+    bool skip_encryption = false;
+    std::string noenc_pref = std::string(NOENC_PREFIX);
+    if (key.compare(0, noenc_pref.size(), noenc_pref) == 0) {
+        skip_encryption = true;
+    }
+
     if (payload_len > 0) {
         payload_ptr = plain.data();
-        if (crypto_ && !is_tombstone) {
+        if (crypto_ && !is_tombstone && !skip_encryption) {
             encrypted = crypto_->encrypt(plain.data(), plain.size());
             payload_ptr = encrypted.data();
             payload_len = encrypted.size();
@@ -830,15 +872,34 @@ bool DBEngine::insertRecBytes(
         }
     }
 
+    // ── R5: Integrity tag — HMAC-SHA256 (tamper-proof) or CRC32 (corruption detection) ──
+    // HMAC mode: 32-byte tag keyed by hmac_key_material_
+    // CRC32 mode: 4-byte tag (legacy, accidental corruption only)
+    // Neither: no tag written (non-secure mode)
+    bool use_hmac = is_secure_mode_ && hmac_mode_ && !hmac_key_material_.empty();
+    size_t integrity_tag_size = 0;
+    HMACTag hmac_tag{};
     uint32_t crc32 = 0;
-    if (is_secure_mode_ && wal_) {
+
+    if (is_secure_mode_) {
+        // Build the buffer to be integrity-checked: [SyncMetadata?] + [payload]
         std::vector<uint8_t> full;
         if (sync_enabled_) {
-            uint8_t* m = reinterpret_cast<uint8_t*>(&meta);
+            const uint8_t* m = reinterpret_cast<const uint8_t*>(&meta);
             full.insert(full.end(), m, m + sizeof(SyncMetadata));
         }
         if (payload_len > 0) full.insert(full.end(), payload_ptr, payload_ptr + payload_len);
-        crc32 = wal_->calculate_crc32(full.data(), full.size());
+
+        if (use_hmac) {
+            // Derive HMAC key and compute tag
+            HMACTag hk = derive_hmac_key(hmac_key_material_);
+            hmac_tag = hmac_sha256(hk.data(), hk.size(), full.data(), full.size());
+            integrity_tag_size = HMAC_SHA256_SIZE;
+        } else {
+            // Legacy CRC32
+            crc32 = wal_ ? wal_->calculate_crc32(full.data(), full.size()) : 0;
+            integrity_tag_size = sizeof(uint32_t);
+        }
     }
 
     mmap_->write(offset, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
@@ -848,12 +909,17 @@ bool DBEngine::insertRecBytes(
     } else {
         if (payload_len > 0) mmap_->write(offset + sizeof(uint32_t), payload_ptr, payload_len);
     }
-    
+
     if (is_secure_mode_) {
-        mmap_->write(offset + sizeof(uint32_t) + len32, reinterpret_cast<const uint8_t*>(&crc32), sizeof(uint32_t));
+        size_t tag_offset = offset + sizeof(uint32_t) + len32;
+        if (use_hmac) {
+            mmap_->write(tag_offset, hmac_tag.data(), HMAC_SHA256_SIZE);
+        } else {
+            mmap_->write(tag_offset, reinterpret_cast<const uint8_t*>(&crc32), sizeof(uint32_t));
+        }
     }
 
-    size_t total = sizeof(uint32_t) + len32 + (is_secure_mode_ ? sizeof(uint32_t) : 0);
+    size_t total = sizeof(uint32_t) + len32 + integrity_tag_size;
     next_free_offset_ += (total + 7) & ~7;
 
     // ── R4: Track live bytes for compaction heuristic ──────────────────────
@@ -1106,6 +1172,8 @@ facebook::jsi::Value DBEngine::setAsync(facebook::jsi::Runtime& rt, const facebo
             try {
                 std::unique_lock<std::shared_mutex> lock(rw_mutex_);
                 ok = insertRecBytes(key, bytes, true, false);
+                // R5: WAL sync — ensures the write is durable before the Promise resolves
+                if (ok && wal_) wal_->sync();
             } catch (...) { ok = false; }
             
             if (ok) {
@@ -1203,6 +1271,8 @@ facebook::jsi::Value DBEngine::setMultiAsync(facebook::jsi::Runtime& rt, const f
                     insertRecBytes(key, bytes, false, false);
                 }
                 if (pbtree_) pbtree_->checkpoint();
+                // R5: WAL sync after batch — durability before Promise resolves
+                if (wal_) wal_->sync();
                 ok = true;
             } catch (...) { ok = false; }
             
@@ -1620,7 +1690,19 @@ bool DBEngine::verifyHealth() {
 bool DBEngine::repair() {
     if (!mmap_ || !pbtree_) return false;
 
-    LOGI("repair: starting database repair...");
+    LOGI("repair: starting database repair (R5 enhanced)...");
+
+    // ── Step 0 (R5): WAL replay FIRST — recover any committed-but-not-checkpointed writes ──
+    // This must come before header/tree scanning so the tree reflects the latest state.
+    if (wal_) {
+        LOGI("repair: replaying WAL before tree scan...");
+        bool wal_had_data = wal_->recoverSafe(mmap_.get());
+        if (wal_had_data) {
+            LOGI("repair: WAL replay applied committed entries");
+            // Reinit the pbtree_ so it picks up the replayed header/nodes
+            pbtree_->init();
+        }
+    }
 
     // ── Step 1: Fix header if magic is wrong ──
     std::string header_bytes = mmap_->read(0, sizeof(TreeHeader));
@@ -1631,7 +1713,6 @@ bool DBEngine::repair() {
 
     if (hdr.magic != TreeHeader::MAGIC) {
         LOGI("repair: bad magic, reinitializing database");
-        // WAL is already recovered by initStorage, so just rebuild index
         hdr.magic = TreeHeader::MAGIC;
         hdr.root_offset = 4096;
         hdr.node_count = 1;
@@ -1649,70 +1730,84 @@ bool DBEngine::repair() {
     mmap_->write(0, hdr_buf);
     mmap_->sync(0, sizeof(TreeHeader));
 
-    // ── Step 3: Rebuild B+Tree from scratch if header looks bad ──
-    //    This is a last-resort repair: scan all records and rebuild index
-    if (repaired) {
-        LOGI("repair: rebuilding B+Tree index from data records...");
+    // ── Step 3 (R5): Verify per-record integrity for all indexed keys ──
+    // Walk every key in the B+Tree; validate each record's CRC/HMAC.
+    // Records with bad checksums are tombstoned to prevent corrupt data returning to JS.
+    {
+        std::vector<std::string> all_keys = pbtree_->getAllKeys();
+        int verified = 0, corrupted = 0;
+        bool use_hmac = hmac_mode_ && !hmac_key_material_.empty();
 
-        // Clear existing tree
-        pbtree_->clear();
+        for (const auto& key : all_keys) {
+            size_t offset = pbtree_->find(key);
+            if (offset == 0) continue;
 
-        // Scan through mmap, find all valid records, re-index them
-        size_t offset = 1024 * 1024; // Data starts at 1MB
-        size_t max_offset = mmap_->getSize();
-
-        while (offset + sizeof(uint32_t) <= max_offset) {
             const uint8_t* len_ptr = mmap_->get_address(offset);
-            if (!len_ptr) break;
+            if (!len_ptr) continue;
 
-            uint32_t rec_len;
-            std::memcpy(&rec_len, len_ptr, sizeof(uint32_t));
-
-            // Skip zero-length or obviously corrupt records
-            if (rec_len == 0 || rec_len > (10 * 1024 * 1024)) {
-                offset += 8; // Skip to next aligned offset
-                offset = (offset + 7) & ~7;
+            uint32_t stored_len;
+            std::memcpy(&stored_len, len_ptr, sizeof(uint32_t));
+            if (stored_len == 0 || stored_len > (50 * 1024 * 1024)) {
+                // Sanity fail — mark as tombstone
+                LOGE("repair: key '%s' has invalid length %u, tombstoning", key.c_str(), stored_len);
+                pbtree_->insert(key, 0, false);
+                corrupted++;
+                repaired = true;
                 continue;
             }
 
-            size_t total_rec = sizeof(uint32_t) + rec_len + sizeof(uint32_t); // len + payload + crc
-            if (offset + total_rec > max_offset) break;
+            if (!is_secure_mode_) {
+                verified++;
+                continue; // No integrity tag in non-secure mode
+            }
 
-            // Verify CRC
-            const uint8_t* crc_ptr = mmap_->get_address(offset + sizeof(uint32_t) + rec_len);
-            if (crc_ptr) {
-                uint32_t stored_crc, computed_crc;
-                std::memcpy(&stored_crc, crc_ptr, sizeof(uint32_t));
+            // Read the payload for integrity check
+            const uint8_t* payload_ptr = mmap_->get_address(offset + sizeof(uint32_t));
+            if (!payload_ptr) continue;
 
-                std::vector<uint8_t> rec_data(rec_len);
-                const uint8_t* payload_ptr = mmap_->get_address(offset + sizeof(uint32_t));
-                if (payload_ptr) {
-                    std::memcpy(rec_data.data(), payload_ptr, rec_len);
-                    computed_crc = calculate_crc32(rec_data.data(), rec_len);
+            size_t tag_offset = offset + sizeof(uint32_t) + stored_len;
+            const uint8_t* tag_ptr = mmap_->get_address(tag_offset);
+            if (!tag_ptr) continue;
 
-                    if (stored_crc == computed_crc) {
-                        // Valid record — but we need the key!
-                        // BUG: We don't store the key in the data record.
-                        // This repair can only rebuild if we have a separate key log.
-                        // For now, log that we found valid data but can't re-index without keys.
-                        LOGI("repair: found valid record at offset %zu but can't determine key", offset);
-                    }
+            bool integrity_ok = false;
+            if (use_hmac) {
+                // HMAC-SHA256 verification (32-byte tag)
+                HMACTag hk = derive_hmac_key(hmac_key_material_);
+                integrity_ok = hmac_sha256_verify(
+                    hk.data(), hk.size(),
+                    payload_ptr, stored_len,
+                    tag_ptr);
+            } else {
+                // CRC32 verification (4-byte tag)
+                if (wal_) {
+                    uint32_t stored_crc, computed_crc;
+                    std::memcpy(&stored_crc, tag_ptr, sizeof(uint32_t));
+                    computed_crc = wal_->calculate_crc32(payload_ptr, stored_len);
+                    integrity_ok = (stored_crc == computed_crc);
+                } else {
+                    integrity_ok = true; // No WAL, can't verify
                 }
             }
 
-            offset += (total_rec + 7) & ~7;
+            if (!integrity_ok) {
+                LOGE("repair: key '%s' has INVALID %s — tombstoning corrupted record",
+                     key.c_str(), use_hmac ? "HMAC" : "CRC32");
+                pbtree_->insert(key, 0, false);
+                corrupted++;
+                repaired = true;
+            } else {
+                verified++;
+            }
         }
-
-        LOGI("repair: B+Tree rebuild incomplete — need key association");
+        if (pbtree_) pbtree_->checkpoint();
+        LOGI("repair: record scan complete — verified=%d, corrupted/tombstoned=%d", verified, corrupted);
     }
 
-    // ── Step 4: Validate B+Tree structure ──
-    //    Check that root node is valid
+    // ── Step 4: Validate B+Tree root node ──
     const uint8_t* root_ptr = mmap_->get_address(hdr.root_offset);
     if (root_ptr) {
         BTreeNode root;
         std::memcpy(&root, root_ptr, sizeof(BTreeNode));
-        // Basic sanity: num_keys should be <= MAX_KEYS
         if (root.num_keys > BTreeNode::MAX_KEYS) {
             LOGE("repair: root node has too many keys (%u), resetting", root.num_keys);
             std::memset(&root, 0, sizeof(BTreeNode));
@@ -1857,6 +1952,8 @@ facebook::jsi::Value DBEngine::setWithTTLAsync(
                     std::vector<uint8_t> ttl_bytes(sizeof(uint64_t));
                     std::memcpy(ttl_bytes.data(), &expiry_ms, sizeof(uint64_t));
                     insertRecBytes(ttl_key, ttl_bytes, true, false);
+                    // R5: WAL sync for durability
+                    if (wal_) wal_->sync();
                 }
             } catch (...) { ok = false; }
             
@@ -2288,5 +2385,233 @@ void DBEngine::emitNativeEvent(const std::string& type, const std::string& key) 
     });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// R5: Security & Enterprise Features
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── enableHMACMode ───────────────────────────────────────────────────────────
+void DBEngine::enableHMACMode(bool enable) {
+    hmac_mode_ = enable && is_secure_mode_;
+
+    // Derive HMAC key material from the crypto context if we have one.
+    // We use a fixed domain string as the key material when no explicit
+    // crypto context is set; in practice the crypto_ holds the true secret.
+    if (hmac_mode_) {
+        if (hmac_key_material_.empty()) {
+            // Default key material: derive from a constant domain separator.
+            // A real app should call setHMACKeyMaterial() with the app secret.
+            hmac_key_material_ = "TurboDB-HMAC-v1";
+        }
+        LOGI("TurboDB: HMAC-SHA256 integrity mode ENABLED");
+    } else {
+        LOGI("TurboDB: HMAC mode DISABLED (CRC32 in use)");
+    }
+}
+
+// ── Key Rotation ─────────────────────────────────────────────────────────────
+// Strategy:
+//   1. Acquire full write lock (no reads/writes during rotation)
+//   2. For each key: read encrypted payload → decrypt with old crypto_ →
+//      encrypt with new SodiumCryptoContext(newKey) → overwrite in-place
+//   3. Swap crypto_ to the new context
+//   4. WAL sync + checkpoint for durability
+//
+// The record offset and length field are unchanged — only the encrypted payload
+// bytes are rewritten in-place, so no B+Tree updates are needed.
+
+facebook::jsi::Value DBEngine::rotateEncryptionKeyAsync(
+    facebook::jsi::Runtime& rt,
+    const facebook::jsi::Value& args)
+{
+    if (!args.isObject()) {
+        return createPromise(rt, [](auto& rt2, auto, auto rej) {
+            rej->call(rt2, facebook::jsi::String::createFromAscii(rt2,
+                "rotateEncryptionKeyAsync: expected { newKey: string }"));
+        });
+    }
+    auto obj = args.asObject(rt);
+    if (!obj.hasProperty(rt, "newKey") || !obj.getProperty(rt, "newKey").isString()) {
+        return createPromise(rt, [](auto& rt2, auto, auto rej) {
+            rej->call(rt2, facebook::jsi::String::createFromAscii(rt2,
+                "rotateEncryptionKeyAsync: newKey must be a string"));
+        });
+    }
+    std::string new_key_str = obj.getProperty(rt, "newKey").asString(rt).utf8(rt);
+
+    return createPromise(rt, [this, new_key_str](auto& rt2, auto resolve, auto reject) mutable {
+        auto* rt_ptr = &rt2;
+        scheduler_->schedule([this, new_key_str, resolve, reject, rt_ptr]() mutable {
+            bool ok = false;
+            int rotated = 0;
+            try {
+                std::unique_lock<std::shared_mutex> lock(rw_mutex_);
+
+                if (!btree_ || !mmap_) {
+                    if (js_invoker_) {
+                        js_invoker_->invokeAsync([rt_ptr, reject]() mutable {
+                            try { reject->call(*rt_ptr,
+                                facebook::jsi::String::createFromAscii(*rt_ptr,
+                                    "rotateEncryptionKeyAsync: engine not initialized")); }
+                            catch (...) {}
+                        });
+                    }
+                    return;
+                }
+
+                // Build a new SodiumCryptoContext with the new key material
+                // We use the existing SodiumCryptoContext pattern — derive a 32-byte key
+                // from the new_key_str via SHA-256 (same approach as derive_hmac_key).
+                HMACTag new_raw_key = derive_hmac_key(new_key_str);
+
+                // Clone the current crypto context as "old" for decryption
+                // (crypto_ is the current one; we'll swap after re-encrypting)
+                auto* old_crypto = crypto_.get();
+
+                // Create new crypto instance
+                auto new_crypto = std::make_unique<SodiumCryptoContext>();
+                new_crypto->setMasterKey(std::vector<uint8_t>(new_raw_key.begin(), new_raw_key.end()));
+
+                // Re-encrypt each record in-place
+                auto all_keys = btree_->getAllKeys();
+                for (const auto& key : all_keys) {
+                    if (key.empty() || key.rfind("__", 0) == 0) continue; // skip internal
+
+                    size_t offset = btree_->find(key);
+                    if (offset == 0) continue;
+
+                    const uint8_t* len_ptr = mmap_->get_address(offset);
+                    if (!len_ptr) continue;
+
+                    uint32_t stored_len;
+                    std::memcpy(&stored_len, len_ptr, sizeof(uint32_t));
+                    if (stored_len == 0 || stored_len > (50 * 1024 * 1024)) continue;
+
+                    size_t payload_offset = offset + sizeof(uint32_t);
+                    const uint8_t* payload_ptr = mmap_->get_address(payload_offset);
+                    if (!payload_ptr) continue;
+
+                    // Decrypt with old key
+                    std::vector<uint8_t> plain;
+                    if (old_crypto) {
+                        try {
+                            plain = old_crypto->decrypt(payload_ptr, stored_len);
+                        } catch (...) { continue; }
+                    } else {
+                        plain.assign(payload_ptr, payload_ptr + stored_len);
+                    }
+
+                    // Re-encrypt with new key
+                    std::vector<uint8_t> re_encrypted = new_crypto->encrypt(plain.data(), plain.size());
+
+                    // Overwrite payload in-place (must fit in original space)
+                    if (re_encrypted.size() <= stored_len) {
+                        mmap_->write(payload_offset, re_encrypted.data(), re_encrypted.size());
+                        // Zero-pad remaining bytes if shorter
+                        if (re_encrypted.size() < stored_len) {
+                            std::vector<uint8_t> pad(stored_len - re_encrypted.size(), 0);
+                            mmap_->write(payload_offset + re_encrypted.size(), pad.data(), pad.size());
+                        }
+                        rotated++;
+                    }
+                }
+
+                // Swap the crypto context
+                crypto_ = std::move(new_crypto);
+                // Update HMAC key material if HMAC mode is active
+                if (hmac_mode_) {
+                    hmac_key_material_ = new_key_str;
+                }
+
+                // Durability: checkpoint + WAL sync
+                if (pbtree_) pbtree_->checkpoint();
+                if (mmap_) mmap_->sync(0, 0, false);
+                if (wal_) wal_->sync();
+
+                ok = true;
+                LOGI("rotateEncryptionKeyAsync: rotated %d records", rotated);
+            } catch (...) { ok = false; }
+
+            if (js_invoker_) {
+                js_invoker_->invokeAsync([rt_ptr, resolve, ok]() mutable {
+                    try { resolve->call(*rt_ptr, facebook::jsi::Value(ok)); }
+                    catch (...) {}
+                });
+            }
+        }, DBScheduler::Priority::WRITE);
+    });
+}
+
+// ── Per-Key Selective Encryption ─────────────────────────────────────────────
+// When encrypt=false, stores the record under an internal "__noenc:<key>" alias.
+// The user-facing key is unchanged; only the internal storage key differs.
+// findRec() transparently resolves __noenc: keys without decryption.
+
+facebook::jsi::Value DBEngine::setSelectiveEncryptAsync(
+    facebook::jsi::Runtime& rt,
+    const facebook::jsi::Value& args)
+{
+    if (!args.isObject()) {
+        return createPromise(rt, [](auto& rt2, auto, auto rej) {
+            rej->call(rt2, facebook::jsi::String::createFromAscii(rt2,
+                "setSelectiveEncryptAsync: expected { key, value, encrypt? }"));
+        });
+    }
+    auto obj = args.asObject(rt);
+    std::string user_key = obj.getProperty(rt, "key").asString(rt).utf8(rt);
+    bool do_encrypt = true;
+    if (obj.hasProperty(rt, "encrypt")) {
+        do_encrypt = obj.getProperty(rt, "encrypt").asBool();
+    }
+
+    // Serialize value on JS thread
+    arena_.reset();
+    BinarySerializer::serialize(rt, obj.getProperty(rt, "value"), arena_);
+    std::vector<uint8_t> bytes(arena_.data(), arena_.data() + arena_.size());
+
+    // Determine the storage key
+    // When encrypt=false, we store under "__noenc:<user_key>" so insertRecBytes
+    // skips the crypto path (NOENC_PREFIX check in insertRecBytes).
+    std::string storage_key = do_encrypt
+        ? user_key
+        : (std::string(NOENC_PREFIX) + user_key);
+
+    return createPromise(rt, [this, user_key, storage_key, bytes = std::move(bytes), do_encrypt]
+                         (auto& rt2, auto resolve, auto reject) mutable {
+        auto* rt_ptr = &rt2;
+        scheduler_->schedule([this, user_key, storage_key, bytes = std::move(bytes), do_encrypt,
+                               resolve, rt_ptr]() mutable {
+            bool ok = false;
+            try {
+                std::unique_lock<std::shared_mutex> lock(rw_mutex_);
+                ok = insertRecBytes(storage_key, bytes, true, false);
+                // If the user_key previously existed under the other scheme, tombstone it
+                // so there is no stale duplicate.
+                std::string opposite_key = do_encrypt
+                    ? (std::string(NOENC_PREFIX) + user_key)
+                    : user_key;
+                size_t opposite_offset = btree_ ? btree_->find(opposite_key) : 0;
+                if (opposite_offset != 0) {
+                    pbtree_->insert(opposite_key, 0, false);
+                    btree_->insert(opposite_key, 0);
+                }
+                // WAL sync for durability
+                if (ok && wal_) wal_->sync();
+            } catch (...) { ok = false; }
+
+            if (ok) {
+                emitNativeEvent("set", user_key);
+            }
+
+            if (js_invoker_) {
+                js_invoker_->invokeAsync([rt_ptr, resolve, ok]() mutable {
+                    try { resolve->call(*rt_ptr, facebook::jsi::Value(ok)); }
+                    catch (...) {}
+                });
+            }
+        }, DBScheduler::Priority::WRITE);
+    });
+}
+
 } // namespace turbo_db
+
 

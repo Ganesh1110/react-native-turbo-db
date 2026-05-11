@@ -14,6 +14,7 @@
 #include "ArenaAllocator.h"
 #include "BinarySerializer.h"
 #include "SecureCryptoContext.h"
+#include "HMACProvider.h"
 #include "WALManager.h"
 #include "DBScheduler.h"
 #include "Compactor.h"
@@ -91,6 +92,10 @@ public:
     // Native TTL — sidecar key pattern: "__ttl:<user_key>" → uint64_t expiry ms
     static constexpr const char* TTL_PREFIX = "__ttl:";
 
+    // ── R5: Security & Enterprise ──
+    // Per-key no-encryption marker: stored internally as "__noenc:<user_key>"
+    static constexpr const char* NOENC_PREFIX = "__noenc:";
+
     facebook::jsi::Value setWithTTLAsync(facebook::jsi::Runtime& runtime,
                                          const facebook::jsi::Value& args);
     facebook::jsi::Value cleanupExpiredAsync(facebook::jsi::Runtime& runtime);
@@ -120,6 +125,38 @@ public:
     // ── R4.1: Native Event Emitter ──
     facebook::jsi::Value registerEventListener(facebook::jsi::Runtime& runtime,
                                                const facebook::jsi::Value& args);
+
+    // ── R5: Security & Enterprise ──
+
+    /**
+     * Rotate the active encryption key.
+     * Re-encrypts every record in the database with the new key on the worker
+     * thread. Holds a write lock for the duration — no reads/writes can proceed
+     * concurrently. Resolves after the full rotation + WAL sync.
+     *
+     * @param args  JS object { newKey: string }
+     */
+    facebook::jsi::Value rotateEncryptionKeyAsync(facebook::jsi::Runtime& runtime,
+                                                   const facebook::jsi::Value& args);
+
+    /**
+     * Store a value with explicit encryption control.
+     *
+     * @param args  JS object { key: string, value: any, encrypt: boolean }
+     *              When encrypt=false the record is stored in plaintext even
+     *              if a crypto context is active (skips crypto overhead).
+     */
+    facebook::jsi::Value setSelectiveEncryptAsync(facebook::jsi::Runtime& runtime,
+                                                   const facebook::jsi::Value& args);
+
+    /**
+     * Enable or disable HMAC-SHA256 per-record integrity tagging.
+     * When enabled, the existing 4-byte CRC32 trailer is replaced with a
+     * 32-byte HMAC-SHA256 tag keyed by the crypto context material.
+     * This provides tamper-detection (not just accidental corruption).
+     * Requires is_secure_mode_ = true.
+     */
+    void enableHMACMode(bool enable);
 
     // ── Sync Engine API ──
     facebook::jsi::Value getLocalChangesAsync(facebook::jsi::Runtime& runtime,
@@ -200,6 +237,8 @@ private:
     bool is_secure_mode_ = true;
     bool sync_enabled_ = false;
     bool needs_repair_ = false;
+    bool hmac_mode_ = false;          // R5: use HMAC-SHA256 instead of CRC32
+    std::string hmac_key_material_;   // R5: key material for HMAC derivation
     std::atomic<uint64_t> logical_clock_{1};
 
     // ── Transaction state ──

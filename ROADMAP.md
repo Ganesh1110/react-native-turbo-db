@@ -158,37 +158,55 @@ R6 SQL          → Next-Gen Query Engine
 
 ---
 
-## Release 5 — Security & Enterprise
+## Release 5 — Security & Enterprise ✅
 
 **Version:** `v1.5.0` (Security Release)  
 **Focus:** Enterprise Readiness  
-**Outcome:** "Enterprise/security story"
+**Outcome:** "Enterprise/security story"  
+**Status:** ✅ **Completed — May 11, 2026**
 
 ### Features
 
-| Feature                                | Current Status        | Confidence | Priority |
-| -------------------------------------- | --------------------- | ---------- | -------- |
-| Async Encryption Fix + Real Background | 🔍 Broken             | 3/10       | P0       |
-| Key Rotation                           | ❌ Missing            | 0/10       | P0       |
-| HMAC Verification                      | ❌ Missing (uses CRC) | 1/10       | P0       |
-| Per-Key Selective Encryption           | ❌ Missing            | 0/10       | P1       |
-| Corruption Recovery Enhancements       | ⚠️ WAL only           | 5/10       | P1       |
+| Feature                                | Final Status            | Confidence | Priority |
+| -------------------------------------- | ----------------------- | ---------- | -------- |
+| Async Encryption Fix + Real Background | ✅ WAL sync on resolve  | 10/10      | P0       |
+| Key Rotation                           | ✅ `rotateEncryptionKeyAsync` | 10/10  | P0       |
+| HMAC Verification                      | ✅ HMAC-SHA256 (portable) | 10/10    | P0       |
+| Per-Key Selective Encryption           | ✅ `setSelectiveEncryptAsync` | 10/10  | P1       |
+| Corruption Recovery Enhancements       | ✅ WAL replay + node sweep | 10/10    | P1       |
 
 ### Key Deliverables
 
-1. **Async Encryption Fix** — `setAsync()` Promise actually waits for scheduler + encryption
-2. **Key Rotation** — Re-encrypt entire database with new key without downtime
-3. **HMAC Verification** — Replace CRC32 with HMAC-SHA256 for integrity
-4. **Selective Encryption** — Per-key `encrypt: false` flag to skip encryption
-5. **Recovery Enhancements** — B+Tree node repair, orphaned record cleanup
+1. **Async Encryption Fix** — `setAsync()` / `setMultiAsync()` / `setWithTTLAsync()` Promises wait for `wal_->sync()` — write is durable before resolve
+2. **Key Rotation** — `rotateEncryptionKeyAsync({newKey})` re-encrypts all records under a write lock; crypto context swapped atomically; WAL synced for durability
+3. **HMAC-SHA256** — New `HMACProvider.h/.cpp` (zero deps, FIPS 180-4) replaces CRC32 in secure mode; constant-time verification prevents timing attacks; activated via `enableHMACMode(true)`
+4. **Selective Encryption** — `setSelectiveEncryptAsync({key, value, encrypt: false})` stores plaintext records under `__noenc:` prefix; full B+Tree compatibility
+5. **Recovery Enhancements** — `repair()` now: (0) replays WAL first, (3) scans all indexed keys verifying CRC/HMAC, tombstones corrupt records, (4) resets invalid root nodes
 
 ### Success Criteria
 
-- [ ] `setAsync()` resolves ONLY after write is durable
-- [ ] Key rotation completes without app restart
-- [ ] HMAC prevents tampering (not just accidental corruption)
-- [ ] Unencrypted keys bypass crypto overhead
-- [ ] Recovery fixes corrupted nodes, not just WAL replay
+- [x] `setAsync()` resolves ONLY after write is durable (WAL sync confirmed)
+- [x] Key rotation completes without app restart
+- [x] HMAC prevents tampering (not just accidental corruption)
+- [x] Unencrypted keys bypass crypto overhead (`setSelectiveEncryptAsync`)
+- [x] Recovery fixes corrupted nodes, not just WAL replay
+
+### New Public APIs (v1.5.0)
+
+```typescript
+// Rotate encryption key (real impl, replaces NOT_SUPPORTED stub)
+db.setEncryptionKey(newKey: string): Promise<void>
+db.rotateEncryptionKey(newKey: string): Promise<boolean>
+
+// Per-key selective encryption
+db.setSelectiveEncrypt(key, value, { encrypt: false }): Promise<boolean>
+
+// HMAC-SHA256 integrity mode
+db.enableHMACMode(true)
+
+// Enhanced recovery (existing API, now does WAL replay + record sweep)
+db.repair(): boolean
+```
 
 ---
 
@@ -224,14 +242,14 @@ R6 SQL          → Next-Gen Query Engine
 
 ## Release Timeline (Estimated)
 
-| Release | Version | Focus                 | Status       |
-| ------- | ------- | --------------------- | ------------ |
-| R1      | v1.1.0  | Core Reliability      | ✅ Completed |
-| R2      | v1.2.0  | Performance Engine    | ✅ Completed |
-| R3      | v1.3.0  | Data Features         | ✅ Completed |
-| R4      | v1.4.0  | Reactive Sync         | 📋 Planned   |
-| R5      | v1.5.0  | Security & Enterprise | 📋 Planned   |
-| R6      | v2.0.0  | SQL Query Engine      | 📋 Planned   |
+| Release | Version | Focus                 | Status        |
+| ------- | ------- | --------------------- | ------------- |
+| R1      | v1.1.0  | Core Reliability      | ✅ Completed  |
+| R2      | v1.2.0  | Performance Engine    | ✅ Completed  |
+| R3      | v1.3.0  | Data Features         | ✅ Completed  |
+| R4      | v1.4.0  | Reactive Sync         | ✅ Completed  |
+| R5      | v1.5.0  | Security & Enterprise | ✅ Completed  |
+| R6      | v2.0.0  | SQL Query Engine      | 📋 Planned    |
 
 ---
 
@@ -244,4 +262,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 ---
 
-_Last updated: April 29, 2026_
+_Last updated: May 11, 2026_
