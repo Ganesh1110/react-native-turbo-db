@@ -13,17 +13,18 @@
 
 **react-native-turbo-db** is a high-performance JSI database and **AsyncStorage alternative** for React Native, featuring encrypted storage, WAL persistence, B+tree indexing, and offline-first local database support.
 
-## ⚡ What's New in v1.4.0 (Reactive Sync Release)
+## ⚡ What's New in v1.5.0 (Security Release)
 
-TurboDB v1.4.0 brings reactive data and a working offline sync engine:
+TurboDB v1.5.0 is a dedicated hardening release focused on encryption correctness and hardware-backed security:
 
-- 👁️ **Live Queries** — `watchKey(key, cb)`, `watchPrefix(prefix, cb)`, `watchQuery(fn, cb)` — subscribe to data changes. All fire immediately and return an unsubscribe function.
-- 🔄 **Real Sync Engine** — `getLocalChangesAsync()`, `applyRemoteChangesAsync()` (Last-Write-Wins), `markPushedAsync()` are now fully implemented, not stubs.
-- 🗜️ **Correct Compaction** — `compactAsync()` now has a real native binding with mmap remap after rename. `live_bytes_` tracking ensures the 30% fragmentation threshold works correctly.
-- 🐛 **3 Critical Bug Fixes** — Stale mmap after compaction, `live_bytes_` always 0, `compact()` calling `repair()` instead of the compactor.
+- 🔐 **XChaCha20-Poly1305 Encryption** — All data at rest is encrypted via `libsodium`. The `SecureCryptoContext` class now correctly wires through every read/write path in the C++ engine.
+- 🔑 **Encryption Key Rotation** — `rotateEncryptionKeyAsync(newKey)` re-encrypts all records in a single atomic pass without downtime.
+- 🛡️ **Hardware Secure Enclave** — `setSecureItemAsync` / `getSecureItemAsync` now use the device Keystore (Android) and Secure Enclave (iOS) for master-key storage.
+- 🐛 **Critical C++ Fix** — Resolved incorrect `SodiumCryptoContext` instantiation that silently disabled encryption in the `DBEngine` constructor.
+- ✅ **Android Build Stabilised** — Removed stale `calculate_crc32` dependency; repair logic now delegates cleanly to `PersistentBPlusTree::repair()`.
 
 > [!NOTE]
-> _Built on v1.3.0 Data Management (TTL, Prefix Search, Regex, Blob, Import/Export)_
+> _Built on v1.4.0 Reactive Sync (Live Queries, Real Sync Engine, Correct Compaction)_
 
 ---
 
@@ -185,27 +186,28 @@ await db.deleteAllAsync();
 | `rangeQueryAsync(start, end)` | Background range fetch.                                     |
 | `getAllKeysAsync()`           | Background get all keys.                                    |
 
-### Extended API (v1.4.0)
+### Extended API (v1.4.0 / v1.5.0)
 
-| Method                                     | Description                                                   |
-| :----------------------------------------- | :------------------------------------------------------------ |
-| `watchKey(key, cb)`                        | Reactive key watcher — fires immediately, returns unsubscribe |
-| `watchPrefix(prefix, cb, opts?)`           | Reactive prefix query with optional debounce                  |
-| `watchQuery(fn, cb, opts?)`                | Reactive arbitrary async query with debounce                  |
-| `compactAsync()`                           | Native compaction with fragmentation guard (>30%)             |
-| `setWithTTLAsync(key, val, ttlMs)`         | Native TTL — durable expiry via C++ sidecar key               |
-| `cleanupExpiredAsync()`                    | Native sweep of all expired TTL keys. Returns count.          |
-| `getByPrefixAsync(prefix)`                 | Native B+Tree prefix traversal                                |
-| `regexSearchAsync(pattern)`                | Regex key filter using `std::regex`                           |
-| `exportAsync()`                            | Full DB snapshot as JSON (native traversal)                   |
-| `importAsync(data)`                        | Bulk insert from JSON. Returns record count.                  |
-| `setBlobAsync(key, base64)`                | Store raw binary data >1MB                                    |
-| `getBlobAsync(key)`                        | Retrieve raw binary as base64                                 |
-| `compareAndSet(key, expected, next)`       | Atomic compare-and-set                                        |
-| `merge(key, partial)`                      | Shallow-merge into existing object                            |
-| `setSecureItemAsync(key, val)`             | Hardware Secure Enclave storage                               |
-| `getSecureItemAsync(key)`                  | Retrieve from Secure Enclave                                  |
-| `for await (const key of db.streamKeys())` | Async key streaming for large datasets                        |
+| Method                                     | Description                                                              |
+| :----------------------------------------- | :----------------------------------------------------------------------- |
+| `watchKey(key, cb)`                        | Reactive key watcher — fires immediately, returns unsubscribe            |
+| `watchPrefix(prefix, cb, opts?)`           | Reactive prefix query with optional debounce                             |
+| `watchQuery(fn, cb, opts?)`                | Reactive arbitrary async query with debounce                             |
+| `compactAsync()`                           | Native compaction with fragmentation guard (>30%)                        |
+| `setWithTTLAsync(key, val, ttlMs)`         | Native TTL — durable expiry via C++ sidecar key                          |
+| `cleanupExpiredAsync()`                    | Native sweep of all expired TTL keys. Returns count.                     |
+| `getByPrefixAsync(prefix)`                 | Native B+Tree prefix traversal                                           |
+| `regexSearchAsync(pattern)`                | Regex key filter using `std::regex`                                      |
+| `exportAsync()`                            | Full DB snapshot as JSON (native traversal)                              |
+| `importAsync(data)`                        | Bulk insert from JSON. Returns record count.                             |
+| `setBlobAsync(key, base64)`                | Store raw binary data >1MB                                               |
+| `getBlobAsync(key)`                        | Retrieve raw binary as base64                                            |
+| `compareAndSet(key, expected, next)`       | Atomic compare-and-set                                                   |
+| `merge(key, partial)`                      | Shallow-merge into existing object                                       |
+| `setSecureItemAsync(key, val)`             | **v1.5.0** Hardware Secure Enclave / Android Keystore storage            |
+| `getSecureItemAsync(key)`                  | **v1.5.0** Retrieve from Secure Enclave / Android Keystore               |
+| `rotateEncryptionKeyAsync(newKey)`         | **v1.5.0** Atomic key rotation — re-encrypts all records in one pass     |
+| `for await (const key of db.streamKeys())` | Async key streaming for large datasets                                   |
 
 </details>
 
@@ -345,4 +347,4 @@ MIT © [Ganesh Jayaprakash](https://github.com/ganeshjayaprakash)
   <a href="https://github.com/ganeshjayaprakash/react-native-turbo-db">GitHub</a>
 </p>
 
-<p align="center"><sub>Last updated: May 2026 — v1.4.0 Reactive Sync Release</sub></p>
+<p align="center"><sub>Last updated: May 2026 — v1.5.0 Security Release</sub></p>
