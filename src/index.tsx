@@ -1398,7 +1398,7 @@ export class TurboDB {
     const ok = await getNativeDB().rotateEncryptionKeyAsync({ newKey });
     if (!ok) {
       throw new TurboDBError(
-        TurboDBErrorCode.INTERNAL_ERROR,
+        TurboDBErrorCode.IO_FAIL,
         'setEncryptionKey: key rotation failed — check native logs for details'
       );
     }
